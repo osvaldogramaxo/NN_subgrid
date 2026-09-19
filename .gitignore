@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Editor / tooling
+.vscode/
+.plan_backup/
+
+# DNS data and archives (multi-GB, not versionable)
+test1/
+*.zip
+
+# Model checkpoints and run outputs
+checkpoints/
+results/
+results_bak*/
+condor_logs/
+
+# Unrelated vendored tool
+transferwee/
+
+# Reference papers (copyrighted, large)
+*.pdf
+
+# Scratch: keep the diagnostic tooling, drop the rest
+scratch/*
+!scratch/diagnose_divergence.py

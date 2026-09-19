@@ -1,0 +1,30 @@
+# ==============================================================================
+# condor_train.sub
+# HTCondor submit file for CRMHD-TBNN Subgrid-Scale Closure Training
+# ==============================================================================
+
+universe       = vanilla
+executable     = ./run_train.sh
+
+# Arguments: <data_dir> <coarsening_factor> <stride> <epochs> <batch_size> <lr> <device> <plot_interval> [patience] [extra_flags...]
+# To resume training from checkpoints/ (picks up latest_model.pt or best_model.pt), append --resume to extra_flags.
+# Example: arguments = "test1 4 5 2500 2048 1e-3 cuda 10 --loss-alpha 100.0 --loss-beta 0.1 --loss-gamma 5.0 --loss-delta 2.0 --resume"
+arguments      = "test1 4 5 2500 2048 1e-5 cuda 10 --loss-alpha 100.0 --loss-beta 1 --loss-gamma 5.0 --loss-delta 10 --resume --reset-lr "
+
+# Output log files
+output         = ./condor_logs/train_$(Cluster)_$(Process).out
+error          = ./condor_logs/train_$(Cluster)_$(Process).err
+log            = ./condor_logs/train_$(Cluster)_$(Process).log
+
+# Environment
+getenv         = True
+
+# Resources
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+
+# Optional cluster constraints (e.g. for Artemisa nodes)
++UseNvidiaA100 = True
+
+queue 1

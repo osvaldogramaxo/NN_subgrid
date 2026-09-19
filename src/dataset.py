@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import os
+import warnings
 from pathlib import Path
 
 import h5py
@@ -36,6 +37,8 @@ from torch.utils.data import Dataset, DataLoader
 # ---------------------------------------------------------------------------
 GAMMA_EOS = 4.0 / 3.0  # Adiabatic index for ideal gas EOS (Γ = 4/3)
 GHOST = 3               # Number of ghost cells on each boundary
+V_MAX_SQ = 0.98         # Repair target for unphysical cells (W ≈ 7.08); matches the
+                        # ceiling relativistic_favre_filter already applies.
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +71,24 @@ def read_snapshot(filepath: str | Path) -> dict[str, np.ndarray]:
 
     vx = sx / rho
     vy = sy / rho
+
+    # A few Aenus dumps (t=10.0 and t=13.0 in test1) contain a handful of superluminal
+    # cells. Left alone they make W = 1/sqrt(1-v²) blow up and compute_sgs_stress returns
+    # |τ| ~ 1e12 instead of ~1e-4, which silently poisons training targets and any
+    # time-interpolated exact closure that spans the snapshot.
+    v_sq = vx**2 + vy**2
+    unphysical = v_sq >= 1.0
+    n_bad = int(unphysical.sum())
+    if n_bad:
+        warnings.warn(
+            f"{Path(filepath).name} (t={t}): {n_bad} superluminal cell(s), max v² = "
+            f"{v_sq.max():.6f}; rescaling those cells to v² = {V_MAX_SQ}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        scale = np.where(unphysical, np.sqrt(V_MAX_SQ / np.maximum(v_sq, 1e-30)), 1.0)
+        vx = vx * scale
+        vy = vy * scale
 
     return {"rho": rho, "vx": vx, "vy": vy, "p": p, "t": t}
 

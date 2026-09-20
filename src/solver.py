@@ -1014,6 +1014,74 @@ def clip_sgs_tensor(
         raise ValueError(f"Unknown clip mode: '{mode}'. Expected 'frobenius' or 'eigenvalue'.")
 
 
+def clip_backscatter(
+    tau_perp: torch.Tensor,
+    prims: torch.Tensor,
+    dx: float,
+    dy: float,
+    mode: str = "zero",
+) -> torch.Tensor:
+    r"""Suppress local energy transfer from subgrid to resolved scales.
+
+    The resolved kinetic energy gains energy at rate :math:`\Pi = \tau^{ij} S_{ij}`, so
+    cells with :math:`\Pi > 0` inject energy (backscatter). Backscatter is physical --
+    in 2D it is arguably the dominant transfer direction -- but it is unbounded here,
+    and an unconstrained learned closure can use it to drive a grid-scale instability.
+    Clipping it trades that physics for a guarantee of net dissipation.
+
+    Parameters
+    ----------
+    tau_perp : (Ny, Nx, 4, 4) — fluid-frame SGS stress
+    prims : (Ny, Nx, 4) — [ρ, vx, vy, p]
+    dx, dy : grid spacings
+    mode : str
+        "zero"    — null the whole tensor wherever Π > 0 (strictest; clearest diagnostic)
+        "project" — subtract only the strain-aligned part responsible for the
+                    backscatter, leaving the rest of the tensor intact
+
+    Returns
+    -------
+    (Ny, Nx, 4, 4) tensor
+    """
+    vx = prims[..., 1]
+    vy = prims[..., 2]
+
+    dvx_dx = (torch.roll(vx, -1, dims=-1) - torch.roll(vx, 1, dims=-1)) / (2.0 * dx)
+    dvx_dy = (torch.roll(vx, -1, dims=-2) - torch.roll(vx, 1, dims=-2)) / (2.0 * dy)
+    dvy_dx = (torch.roll(vy, -1, dims=-1) - torch.roll(vy, 1, dims=-1)) / (2.0 * dx)
+    dvy_dy = (torch.roll(vy, -1, dims=-2) - torch.roll(vy, 1, dims=-2)) / (2.0 * dy)
+
+    S_xx = dvx_dx
+    S_yy = dvy_dy
+    S_xy = 0.5 * (dvx_dy + dvy_dx)
+
+    pi = (
+        tau_perp[..., 1, 1] * S_xx
+        + tau_perp[..., 2, 2] * S_yy
+        + 2.0 * tau_perp[..., 1, 2] * S_xy
+    )
+    backscattering = pi > 0.0
+
+    if mode == "zero":
+        return torch.where(
+            backscattering.unsqueeze(-1).unsqueeze(-1),
+            torch.zeros_like(tau_perp),
+            tau_perp,
+        )
+
+    if mode == "project":
+        S = torch.zeros_like(tau_perp)
+        S[..., 1, 1] = S_xx
+        S[..., 2, 2] = S_yy
+        S[..., 1, 2] = S_xy
+        S[..., 2, 1] = S_xy
+        S_sq = S_xx**2 + S_yy**2 + 2.0 * S_xy**2
+        coeff = torch.where(backscattering, pi / S_sq.clamp(min=1e-30), torch.zeros_like(pi))
+        return tau_perp - coeff.unsqueeze(-1).unsqueeze(-1) * S
+
+    raise ValueError(f"Unknown backscatter clip mode: '{mode}'. Expected 'zero' or 'project'.")
+
+
 # ---------------------------------------------------------------------------
 # Conservative Viscous Flux Formulation
 # ---------------------------------------------------------------------------

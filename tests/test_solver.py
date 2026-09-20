@@ -24,6 +24,7 @@ from src.solver import (
     compute_sgs_viscous_fluxes,
     compute_transition_sensor,
     clip_sgs_tensor,
+    clip_backscatter,
 )
 
 
@@ -679,6 +680,44 @@ def test_sgs_viscous_flux_divergence_is_conservative():
     print(f"✓ SGS face interpolation is conservative and {order:.2f}-order accurate")
 
 
+def test_clip_backscatter():
+    """Dissipative stress must survive untouched; backscattering stress must be removed."""
+    dtype = torch.float64
+    N = 32
+    dx = dy = 1.0 / N
+    xs = (torch.arange(N, dtype=dtype) / N).view(1, N).expand(N, N)
+    prims = torch.stack([
+        torch.ones(N, N, dtype=dtype),
+        0.3 * torch.sin(2 * torch.pi * xs),
+        torch.zeros(N, N, dtype=dtype),
+        torch.ones(N, N, dtype=dtype),
+    ], dim=-1)
+
+    g = (torch.roll(prims[..., 1], -1, -1) - torch.roll(prims[..., 1], 1, -1)) / (2 * dx)
+    S = torch.zeros(N, N, 4, 4, dtype=dtype)
+    S[..., 1, 1] = g
+
+    pi = lambda T: (T[..., 1, 1] * g)
+
+    for mode in ("zero", "project"):
+        kept = clip_backscatter(-S, prims, dx, dy, mode=mode)
+        assert torch.allclose(kept, -S), f"{mode}: purely dissipative stress was modified"
+
+        removed = clip_backscatter(S, prims, dx, dy, mode=mode)
+        assert pi(S).sum() > 0, "test setup: expected backscattering stress"
+        assert pi(removed).max() < 1e-20, \
+            f"{mode}: backscatter survived, max Pi = {pi(removed).max()}"
+
+    # "project" must preserve the components orthogonal to the strain
+    tau = S.clone()
+    tau[..., 1, 2] = tau[..., 2, 1] = 0.7
+    proj = clip_backscatter(tau, prims, dx, dy, mode="project")
+    assert torch.allclose(proj[..., 1, 2], tau[..., 1, 2]), \
+        "project mode altered a shear component orthogonal to the clipped strain"
+
+    print("✓ clip_backscatter removes backscatter and preserves dissipative stress")
+
+
 if __name__ == "__main__":
     test_prim_cons_roundtrip()
     test_conservation()
@@ -690,6 +729,7 @@ if __name__ == "__main__":
     test_compute_sgs_viscous_fluxes()
     test_compute_transition_sensor()
     test_clip_sgs_tensor()
+    test_clip_backscatter()
     test_flux_closure_conservation()
     test_c2p_newton_derivative()
     test_c2p_extreme_state_roundtrip()

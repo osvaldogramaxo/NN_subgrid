@@ -25,6 +25,7 @@ from src.solver import (
     compute_transition_sensor,
     clip_sgs_tensor,
     clip_backscatter,
+    smooth_sgs_tensor,
 )
 
 
@@ -718,6 +719,63 @@ def test_clip_backscatter():
     print("✓ clip_backscatter removes backscatter and preserves dissipative stress")
 
 
+def test_smooth_sgs_tensor_transfer():
+    """The (1,2,1)/4 filter must kill 2dx, strongly damp 3dx, and preserve large scales."""
+    dtype = torch.float64
+    # N must be divisible by every test wavelength, else the mode wraps
+    # discontinuously and its amplitude is not recoverable from the max.
+    N = 48
+    i = torch.arange(N, dtype=dtype)
+    expected = {2: 0.0, 3: 0.25, 4: 0.5, 6: 0.75, 8: 0.854, 16: 0.962}
+    for wavelength, want in expected.items():
+        field = torch.cos(2 * torch.pi * i / wavelength).view(1, N).expand(N, N)
+        tau = torch.zeros(N, N, 4, 4, dtype=dtype)
+        tau[..., 1, 1] = field
+        out = smooth_sgs_tensor(tau, n_passes=1)
+        got = out[..., 1, 1].abs().max() / field.abs().max()
+        assert abs(float(got) - want) < 0.02, \
+            f"{wavelength}dx: transfer {float(got):.3f}, expected ~{want}"
+
+    # n_passes=0 must be a no-op
+    tau = torch.randn(8, 8, 4, 4, dtype=dtype)
+    assert torch.equal(smooth_sgs_tensor(tau, 0), tau)
+    print("✓ smooth_sgs_tensor has the intended scale-selective transfer")
+
+
+def test_clip_backscatter_fraction():
+    """fraction interpolates between a strict clip and no clipping at all."""
+    dtype = torch.float64
+    N = 32
+    dx = dy = 1.0 / N
+    xs = (torch.arange(N, dtype=dtype) / N).view(1, N).expand(N, N)
+    prims = torch.stack([
+        torch.ones(N, N, dtype=dtype),
+        0.3 * torch.sin(2 * torch.pi * xs),
+        torch.zeros(N, N, dtype=dtype),
+        torch.ones(N, N, dtype=dtype),
+    ], dim=-1)
+    g = (torch.roll(prims[..., 1], -1, -1) - torch.roll(prims[..., 1], 1, -1)) / (2 * dx)
+    S = torch.zeros(N, N, 4, 4, dtype=dtype)
+    S[..., 1, 1] = g
+    pi_of = lambda T: (T[..., 1, 1] * g).sum()
+
+    full = pi_of(S)
+    assert full > 0
+    for mode in ("zero", "project"):
+        # fraction=1.0 is a no-op
+        assert torch.equal(clip_backscatter(S, prims, dx, dy, mode=mode, fraction=1.0), S)
+        # fraction=0.0 removes it
+        assert pi_of(clip_backscatter(S, prims, dx, dy, mode=mode, fraction=0.0)) < 1e-20
+        # intermediate is monotone and bracketed
+        prev = 0.0
+        for frac in (0.25, 0.5, 0.75):
+            got = float(pi_of(clip_backscatter(S, prims, dx, dy, mode=mode, fraction=frac)))
+            assert 0.0 < got < float(full), f"{mode} frac={frac}: Pi={got} outside (0, {full})"
+            assert got > prev, f"{mode}: retained backscatter not monotone in fraction"
+            prev = got
+    print("✓ clip_backscatter fraction interpolates monotonically")
+
+
 if __name__ == "__main__":
     test_prim_cons_roundtrip()
     test_conservation()
@@ -730,6 +788,8 @@ if __name__ == "__main__":
     test_compute_transition_sensor()
     test_clip_sgs_tensor()
     test_clip_backscatter()
+    test_smooth_sgs_tensor_transfer()
+    test_clip_backscatter_fraction()
     test_flux_closure_conservation()
     test_c2p_newton_derivative()
     test_c2p_extreme_state_roundtrip()

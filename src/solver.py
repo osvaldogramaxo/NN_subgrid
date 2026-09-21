@@ -1014,12 +1014,39 @@ def clip_sgs_tensor(
         raise ValueError(f"Unknown clip mode: '{mode}'. Expected 'frobenius' or 'eigenvalue'.")
 
 
+def smooth_sgs_tensor(tau_perp: torch.Tensor, n_passes: int = 1) -> torch.Tensor:
+    r"""Low-pass the SGS stress with an (1,2,1)/4 filter in each direction.
+
+    The SGS flux divergence passes 3Δ–4Δ content at 57–80% but annihilates the 2Δ mode
+    exactly, so the closure can inject energy near the grid scale without any ability to
+    remove it there. That one-way valve is what lets an otherwise well-behaved learned
+    stress drive a grid-scale instability. Filtering τ closes it while leaving the
+    large-scale backscatter — the physically meaningful part in 2D — essentially intact.
+
+    Transfer per pass: 0.99 at 32Δ, 0.96 at 16Δ, 0.85 at 8Δ, 0.50 at 4Δ, 0.25 at 3Δ,
+    0.00 at 2Δ.
+
+    Parameters
+    ----------
+    tau_perp : (Ny, Nx, 4, 4) tensor
+    n_passes : int — filter applications; 0 returns the input unchanged
+    """
+    out = tau_perp
+    for _ in range(n_passes):
+        for dim in (-3, -4):  # y and x axes of an (Ny, Nx, 4, 4) tensor
+            out = 0.25 * (
+                torch.roll(out, 1, dims=dim) + 2.0 * out + torch.roll(out, -1, dims=dim)
+            )
+    return out
+
+
 def clip_backscatter(
     tau_perp: torch.Tensor,
     prims: torch.Tensor,
     dx: float,
     dy: float,
     mode: str = "zero",
+    fraction: float = 0.0,
 ) -> torch.Tensor:
     r"""Suppress local energy transfer from subgrid to resolved scales.
 
@@ -1038,11 +1065,17 @@ def clip_backscatter(
         "zero"    — null the whole tensor wherever Π > 0 (strictest; clearest diagnostic)
         "project" — subtract only the strain-aligned part responsible for the
                     backscatter, leaving the rest of the tensor intact
+    fraction : float in [0, 1] — how much backscatter to *retain*. 0.0 removes it
+        entirely (the strict clip), 1.0 is a no-op. Intermediate values trade stability
+        against the inverse-cascade physics, which matters in 2D where backscatter is
+        not a small correction.
 
     Returns
     -------
     (Ny, Nx, 4, 4) tensor
     """
+    if fraction >= 1.0:
+        return tau_perp
     vx = prims[..., 1]
     vy = prims[..., 2]
 
@@ -1065,7 +1098,7 @@ def clip_backscatter(
     if mode == "zero":
         return torch.where(
             backscattering.unsqueeze(-1).unsqueeze(-1),
-            torch.zeros_like(tau_perp),
+            fraction * tau_perp,
             tau_perp,
         )
 
@@ -1077,7 +1110,7 @@ def clip_backscatter(
         S[..., 2, 1] = S_xy
         S_sq = S_xx**2 + S_yy**2 + 2.0 * S_xy**2
         coeff = torch.where(backscattering, pi / S_sq.clamp(min=1e-30), torch.zeros_like(pi))
-        return tau_perp - coeff.unsqueeze(-1).unsqueeze(-1) * S
+        return tau_perp - (1.0 - fraction) * coeff.unsqueeze(-1).unsqueeze(-1) * S
 
     raise ValueError(f"Unknown backscatter clip mode: '{mode}'. Expected 'zero' or 'project'.")
 

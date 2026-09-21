@@ -40,7 +40,7 @@ from src.dataset import (
     read_snapshot, relativistic_favre_filter, GAMMA_EOS, compute_sgs_stress,
 )
 from src.features import extract_tbnn_features
-from src.solver import RHDSolver, compute_transition_sensor, clip_sgs_tensor, clip_backscatter
+from src.solver import RHDSolver, compute_transition_sensor, clip_sgs_tensor, clip_backscatter, smooth_sgs_tensor
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +458,8 @@ class TBNNSGSClosure:
     clip_mode : str — "frobenius" (default) or "eigenvalue"
     clip_kappa : float — clipping threshold as fraction of local pressure
     backscatter_clip : str or None — None (allow backscatter), "zero", or "project"
+    backscatter_fraction : float — fraction of backscatter to retain (0 = strict clip)
+    tau_smooth_passes : int — (1,2,1)/4 low-pass applications on tau before use
     """
 
     def __init__(
@@ -473,6 +475,8 @@ class TBNNSGSClosure:
         clip_mode: str = "frobenius",
         clip_kappa: float = 0.5,
         backscatter_clip: str | None = None,
+        backscatter_fraction: float = 0.0,
+        tau_smooth_passes: int = 0,
     ):
         self.model = model
         self.model.eval()
@@ -487,6 +491,8 @@ class TBNNSGSClosure:
         self.clip_mode = clip_mode
         self.clip_kappa = clip_kappa
         self.backscatter_clip = backscatter_clip
+        self.backscatter_fraction = backscatter_fraction
+        self.tau_smooth_passes = tau_smooth_passes
 
     @torch.no_grad()
     def __call__(self, prims: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -530,9 +536,13 @@ class TBNNSGSClosure:
             tau_perp, prims, mode=self.clip_mode, kappa=self.clip_kappa,
         )
 
+        if self.tau_smooth_passes:
+            tau_perp = smooth_sgs_tensor(tau_perp, self.tau_smooth_passes)
+
         if self.backscatter_clip is not None:
             tau_perp = clip_backscatter(
                 tau_perp, prims, self.dx, self.dy, mode=self.backscatter_clip,
+                fraction=self.backscatter_fraction,
             )
 
         # Transition sensor
@@ -676,6 +686,8 @@ class ExactDNSSGSClosure:
         clip_mode: str = "frobenius",
         clip_kappa: float = 0.5,
         backscatter_clip: str | None = None,
+        backscatter_fraction: float = 0.0,
+        tau_smooth_passes: int = 0,
     ):
         self.dx = dx
         self.dy = dy
@@ -685,6 +697,8 @@ class ExactDNSSGSClosure:
         self.clip_mode = clip_mode
         self.clip_kappa = clip_kappa
         self.backscatter_clip = backscatter_clip
+        self.backscatter_fraction = backscatter_fraction
+        self.tau_smooth_passes = tau_smooth_passes
 
         sorted_snaps = sorted(snapshots, key=lambda s: s["t"])
         self.times = [float(s["t"]) for s in sorted_snaps]
@@ -738,9 +752,13 @@ class ExactDNSSGSClosure:
             tau, prims, mode=self.clip_mode, kappa=self.clip_kappa,
         )
 
+        if self.tau_smooth_passes:
+            tau = smooth_sgs_tensor(tau, self.tau_smooth_passes)
+
         if self.backscatter_clip is not None:
             tau = clip_backscatter(
                 tau, prims, self.dx, self.dy, mode=self.backscatter_clip,
+                fraction=self.backscatter_fraction,
             )
 
         # Transition sensor
@@ -768,6 +786,8 @@ def evaluate_rollout(
     device_str: str = "cuda",
     skip_exact: bool = False,
     backscatter_clip: str | None = None,
+    backscatter_fraction: float = 0.0,
+    tau_smooth_passes: int = 0,
     with_unclosed: bool = False,
     save_history: bool = False,
     make_anim: bool = False,
@@ -808,6 +828,20 @@ def evaluate_rollout(
     r = coarsening_factor
     os.makedirs(output_dir, exist_ok=True)
     save_int = anim_interval if (save_history or make_anim) else None
+
+    # Solvers that blow up raise FloatingPointError from evolve(); catching it here
+    # (instead of letting it crash the process) preserves whatever states were
+    # already recorded in the solver's history buffer up to that point.
+    diverged_at: dict[str, float] = {}
+
+    def _safe_evolve(solver: "RHDSolver", key: str, **kwargs) -> bool:
+        try:
+            solver.evolve(t_end, **kwargs)
+            return True
+        except FloatingPointError as e:
+            print(f"\n[DIVERGED] {key} solver diverged: {e}")
+            diverged_at[key] = float(solver.t)
+            return False
 
     # Load all snapshots and identify start/end
     files = sorted(glob.glob(os.path.join(data_dir, "h*.h5")))
@@ -879,9 +913,11 @@ def evaluate_rollout(
                 ckpt["thermo_std"].to(device),
                 dx, dy,
                 backscatter_clip=backscatter_clip,
+                backscatter_fraction=backscatter_fraction,
+                tau_smooth_passes=tau_smooth_passes,
             )
-            solver_tbnn.evolve(
-                t_end,
+            ok_tbnn = _safe_evolve(
+                solver_tbnn, "tbnn",
                 sgs_closure=tbnn_closure,
                 verbose=True,
                 progress_bar=True,
@@ -903,8 +939,8 @@ def evaluate_rollout(
                 ckpt["thermo_std"].to(device),
                 dx, dy,
             )
-            solver_tbnn.evolve(
-                t_end,
+            ok_tbnn = _safe_evolve(
+                solver_tbnn, "tbnn",
                 sgs_model=sgs_model,
                 verbose=True,
                 progress_bar=True,
@@ -912,7 +948,7 @@ def evaluate_rollout(
                 save_interval=save_int,
             )
 
-        prims_tbnn = solver_tbnn.get_primitives()
+        prims_tbnn = solver_tbnn.get_primitives() if ok_tbnn else None
         if save_int is not None:
             history_tbnn = solver_tbnn.get_history()
     else:
@@ -946,9 +982,11 @@ def evaluate_rollout(
                 device=device,
                 dtype=dtype,
                 backscatter_clip=backscatter_clip,
+                backscatter_fraction=backscatter_fraction,
+                tau_smooth_passes=tau_smooth_passes,
             )
-            solver_exact.evolve(
-                t_end,
+            ok_exact = _safe_evolve(
+                solver_exact, "exact",
                 sgs_closure=exact_closure,
                 verbose=True,
                 progress_bar=True,
@@ -965,8 +1003,8 @@ def evaluate_rollout(
                 device=device,
                 dtype=dtype,
             )
-            solver_exact.evolve(
-                t_end,
+            ok_exact = _safe_evolve(
+                solver_exact, "exact",
                 sgs_model=exact_sgs_model,
                 verbose=True,
                 progress_bar=True,
@@ -974,7 +1012,7 @@ def evaluate_rollout(
                 save_interval=save_int,
             )
 
-        prims_exact = solver_exact.get_primitives()
+        prims_exact = solver_exact.get_primitives() if ok_exact else None
         if save_int is not None:
             history_exact = solver_exact.get_history()
 
@@ -997,15 +1035,15 @@ def evaluate_rollout(
             coarse0["p_bar"].to(device),
         )
         solver_unclosed.t = snap0["t"]
-        solver_unclosed.evolve(
-            t_end,
+        ok_unclosed = _safe_evolve(
+            solver_unclosed, "unclosed",
             verbose=True,
             progress_bar=True,
             desc="Unclosed (no SGS)",
             save_interval=save_int,
         )
 
-        prims_unclosed = solver_unclosed.get_primitives()
+        prims_unclosed = solver_unclosed.get_primitives() if ok_unclosed else None
         if save_int is not None:
             history_unclosed = solver_unclosed.get_history()
 
@@ -1174,6 +1212,10 @@ def evaluate_rollout(
     plt.close()
     print(f"\nPlot saved to {fig_path}")
 
+    if diverged_at:
+        results["diverged_at"] = diverged_at
+        print(f"\n[DIVERGED] Solver(s) diverged before t_end={t_end}: {diverged_at}")
+
     # Save metrics
     with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump(results, f, indent=2)
@@ -1242,6 +1284,7 @@ def evaluate_rollout(
             "exact": history_exact,
             "unclosed": history_unclosed,
             "grid": {"Ny": Nc_y, "Nx": Nc_x, "dx": dx, "dy": dy, "r": r},
+            "diverged_at": diverged_at,
         }
         torch.save(traj_data, traj_path)
         print(f"\nTrajectory history saved to {traj_path}")
@@ -1284,6 +1327,14 @@ if __name__ == "__main__":
                         help="Suppress SGS backscatter (tau:S > 0). 'zero' nulls the tensor in "
                              "those cells, 'project' removes only the strain-aligned part. "
                              "Default: allow backscatter.")
+    parser.add_argument("--backscatter-fraction", type=float, default=0.0,
+                        help="Fraction of backscatter to RETAIN when --backscatter-clip is set. "
+                             "0.0 = strict clip (default), 1.0 = no clipping. Use to trade "
+                             "stability against 2D inverse-cascade physics.")
+    parser.add_argument("--tau-smooth-passes", type=int, default=0,
+                        help="Low-pass the SGS stress with an (1,2,1)/4 filter this many times "
+                             "before applying it. Removes near-grid-scale tau content that the "
+                             "flux divergence can inject but not damp. Try 1 or 2.")
     parser.add_argument("--sgs-coupling", type=str, default="flux", choices=["source", "flux"],
                         help="SGS coupling mode: 'source' (legacy) or 'flux' (conservative viscous flux)")
     parser.add_argument("--save-history", action="store_true", help="Save intermediate snapshot trajectories to rollout_trajectory.pt")
@@ -1305,6 +1356,8 @@ if __name__ == "__main__":
         device_str=args.device,
         skip_exact=args.skip_exact,
         backscatter_clip=args.backscatter_clip,
+        backscatter_fraction=args.backscatter_fraction,
+        tau_smooth_passes=args.tau_smooth_passes,
         with_unclosed=args.with_unclosed,
         save_history=args.save_history,
         make_anim=args.make_anim,

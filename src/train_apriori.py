@@ -815,6 +815,7 @@ def train(
     dtype_str: str = "float64",
     resume: str | bool | None = None,
     reset_lr: bool = False,
+    reset_best: bool = False,
 ):
     """Main training function with physics-based composite loss and checkpoint resumption."""
     if patience is None:
@@ -958,32 +959,44 @@ def train(
                 cur_lr = optimizer.param_groups[0]["lr"]
                 print(f"[Resume] Restored optimizer state (learning rate: {cur_lr:.1e})")
 
-        best_val_loss = float(ckpt.get("best_val_loss", ckpt.get("val_loss", float("inf"))))
-        best_epoch = int(ckpt.get("best_epoch", ckpt.get("epoch", 1)))
         start_epoch = int(ckpt.get("epoch", 0))
 
-        if "scheduler_state_dict" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-            print("[Resume] Restored ReduceLROnPlateau scheduler state")
+        if reset_best:
+            # Treat the checkpoint purely as a weight initialization (e.g. fine-tuning
+            # onto a harder task where loss values from the old run aren't comparable):
+            # drop the previous best_val_loss/scheduler baseline/early-stopping best
+            # instead of carrying them over as the comparison target.
+            print("[Resume] --reset-best: discarding checkpoint's best_val_loss / scheduler baseline / early-stopping best")
         else:
-            if best_val_loss < float("inf"):
-                scheduler.best = best_val_loss
-                print(f"[Resume] Initialized scheduler baseline best={scheduler.best:.6e}")
+            best_val_loss = float(ckpt.get("best_val_loss", ckpt.get("val_loss", float("inf"))))
+            best_epoch = int(ckpt.get("best_epoch", ckpt.get("epoch", 1)))
 
-        if "early_stopping" in ckpt and isinstance(ckpt["early_stopping"], dict):
-            es_dict: dict[str, Any] = ckpt["early_stopping"]
-            early_stopping.counter = int(es_dict.get("counter", 0))
-            best_sc = es_dict.get("best_score", best_val_loss)
-            early_stopping.best_score = float(best_sc) if best_sc is not None else None
-            early_stopping.best_epoch = int(es_dict.get("best_epoch", best_epoch))
-            early_stopping.early_stop = bool(es_dict.get("early_stop", False))
-            print(
-                f"[Resume] Restored early stopping state: best_score={early_stopping.best_score}, "
-                + f"counter={early_stopping.counter}/{early_stopping.patience}"
-            )
-        else:
-            early_stopping.best_score = best_val_loss
-            early_stopping.best_epoch = best_epoch
+            if "scheduler_state_dict" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+                print("[Resume] Restored ReduceLROnPlateau scheduler state")
+            else:
+                if best_val_loss < float("inf"):
+                    scheduler.best = best_val_loss
+                    print(f"[Resume] Initialized scheduler baseline best={scheduler.best:.6e}")
+
+            if "early_stopping" in ckpt and isinstance(ckpt["early_stopping"], dict):
+                es_dict: dict[str, Any] = ckpt["early_stopping"]
+                best_sc = es_dict.get("best_score", best_val_loss)
+                early_stopping.best_score = float(best_sc) if best_sc is not None else None
+                early_stopping.best_epoch = int(es_dict.get("best_epoch", best_epoch))
+            else:
+                early_stopping.best_score = best_val_loss
+                early_stopping.best_epoch = best_epoch
+
+        # Reset the patience counter and stop flag on resume: a resumed run
+        # gets a fresh window to improve on the (restored or reset) best, rather
+        # than inheriting a stale non-improvement streak (or a stuck early_stop=True).
+        early_stopping.counter = 0
+        early_stopping.early_stop = False
+        print(
+            f"[Resume] Early stopping state: best_score={early_stopping.best_score} "
+            + f"(best_epoch={early_stopping.best_epoch}); patience counter reset to 0/{early_stopping.patience}"
+        )
 
         print(
             f"[Resume] Resuming training from epoch {start_epoch} up to target {epochs} "
@@ -1362,8 +1375,8 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--hidden-dim", type=int, default=64)
-    parser.add_argument("--num-hidden-layers", type=int, default=6)
+    parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument("--num-hidden-layers", type=int, default=3)
     parser.add_argument("--loss-alpha", type=float, default=0.5,
                         help="Weight alpha for dissipation rate loss L_P (default: 0.5)")
     parser.add_argument("--loss-beta", type=float, default=0.1,
@@ -1410,6 +1423,15 @@ if __name__ == "__main__":
         action="store_true",
         help="When resuming, override the checkpoint's saved optimizer learning rate with the value of --lr.",
     )
+    parser.add_argument(
+        "--reset-best",
+        action="store_true",
+        help=(
+            "When resuming, discard the checkpoint's best_val_loss / scheduler baseline / early-stopping best "
+            + "and start fresh. Use this when resuming onto a harder task where the old run's loss values "
+            + "aren't a meaningful comparison target (e.g. using the checkpoint only as a weight initialization)."
+        ),
+    )
     args = parser.parse_args()
 
     resume_arg = args.resume_from if args.resume_from is not None else args.resume
@@ -1439,4 +1461,5 @@ if __name__ == "__main__":
         dtype_str=args.dtype,
         resume=resume_arg,
         reset_lr=args.reset_lr,
+        reset_best=args.reset_best,
     )

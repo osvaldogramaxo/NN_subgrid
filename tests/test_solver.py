@@ -26,6 +26,7 @@ from src.solver import (
     clip_sgs_tensor,
     clip_backscatter,
     smooth_sgs_tensor,
+    compute_rhs,
 )
 
 
@@ -776,6 +777,77 @@ def test_clip_backscatter_fraction():
     print("✓ clip_backscatter fraction interpolates monotonically")
 
 
+def test_face_flux_divergence_sees_grid_scale_mode():
+    """The whole point of the face closure: a compact operator responds at 2dx.
+
+    The cell-centred path interpolates before differencing, which annihilates the
+    checkerboard exactly. The face path differences adjacent interfaces directly.
+    """
+    dtype = torch.float64
+    N = 32
+    dx = dy = 1.0 / N
+    i = torch.arange(N, dtype=dtype)
+    checker = ((-1.0) ** i).view(1, N).expand(N, N)
+
+    prims = torch.stack([
+        torch.ones(N, N, dtype=dtype), torch.zeros(N, N, dtype=dtype),
+        torch.zeros(N, N, dtype=dtype), torch.ones(N, N, dtype=dtype),
+    ], dim=-1)
+
+    dF = torch.zeros(N, N, 4, dtype=dtype)
+    dF[..., 1] = checker
+
+    base = compute_rhs(prims, dx, dy, reconstruction="muscl")
+    centred = compute_rhs(prims, dx, dy, sgs_viscous_Fx=dF, reconstruction="muscl") - base
+    faced = compute_rhs(prims, dx, dy, sgs_viscous_Fx=dF,
+                        sgs_fluxes_on_faces=True, reconstruction="muscl") - base
+
+    assert centred.abs().max() < 1e-12, \
+        f"cell-centred path should be blind to 2dx, got {centred.abs().max()}"
+    assert faced.abs().max() > 1.0, \
+        f"face path should respond strongly at 2dx, got {faced.abs().max()}"
+
+    # Both must stay conservative: a flux difference telescopes to zero.
+    for name, out in (("centred", centred), ("faced", faced)):
+        assert out.sum(dim=(0, 1)).abs().max() < 1e-9, f"{name} path is not conservative"
+    print("✓ face flux divergence responds at 2dx; cell-centred path does not")
+
+
+def test_staggered_sgs_stress_is_a_shifted_filter():
+    """Face-staggered stress must equal the centred stress of a pre-shifted field."""
+    from src.dataset import compute_sgs_stress, compute_sgs_stress_on_faces
+    dtype = torch.float64
+    torch.manual_seed(0)
+    r, Nc = 4, 8
+    N = r * Nc
+    rho = 1.0 + 0.2 * torch.rand(N, N, dtype=dtype)
+    p = 1.0 + 0.2 * torch.rand(N, N, dtype=dtype)
+    vx = 0.2 * torch.randn(N, N, dtype=dtype)
+    vy = 0.2 * torch.randn(N, N, dtype=dtype)
+
+    tau_x, tau_y = compute_sgs_stress_on_faces(rho, vx, vy, p, r=r)
+    roll = lambda a, d: torch.roll(a, -r // 2, dims=d)
+    _, ref_x = compute_sgs_stress(*[roll(a, -1) for a in (rho, vx, vy, p)], r=r)
+    _, ref_y = compute_sgs_stress(*[roll(a, -2) for a in (rho, vx, vy, p)], r=r)
+
+    assert torch.allclose(tau_x, ref_x), "x-face stress is not the shifted-box filter"
+    assert torch.allclose(tau_y, ref_y), "y-face stress is not the shifted-box filter"
+    assert tau_x.shape == (Nc, Nc, 4, 4)
+
+    # A uniform field has no subgrid content on any stagger.
+    one = torch.ones(N, N, dtype=dtype)
+    zx, zy = compute_sgs_stress_on_faces(one, 0.3 * one, 0.0 * one, one, r=r)
+    assert zx.abs().max() < 1e-12 and zy.abs().max() < 1e-12
+
+    try:
+        compute_sgs_stress_on_faces(rho, vx, vy, p, r=3)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("odd coarsening factor should be rejected")
+    print("✓ staggered SGS stress matches a shifted filter box")
+
+
 if __name__ == "__main__":
     test_prim_cons_roundtrip()
     test_conservation()
@@ -790,6 +862,8 @@ if __name__ == "__main__":
     test_clip_backscatter()
     test_smooth_sgs_tensor_transfer()
     test_clip_backscatter_fraction()
+    test_face_flux_divergence_sees_grid_scale_mode()
+    test_staggered_sgs_stress_is_a_shifted_filter()
     test_flux_closure_conservation()
     test_c2p_newton_derivative()
     test_c2p_extreme_state_roundtrip()

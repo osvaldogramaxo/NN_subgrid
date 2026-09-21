@@ -346,6 +346,50 @@ def compute_sgs_stress(
     return coarse, tau_sgs
 
 
+def compute_sgs_stress_on_faces(
+    rho: torch.Tensor,
+    vx: torch.Tensor,
+    vy: torch.Tensor,
+    p: torch.Tensor,
+    r: int = 4,
+    project_to_fluid_frame: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""Exact SGS stress evaluated on cell faces rather than cell centres.
+
+    The cell-centred stress must be interpolated to faces before its divergence can be
+    taken, and any symmetric interpolation annihilates the 2Δ mode — so the closure
+    cannot act at the grid scale. Filtering with a box *staggered by r/2 fine cells*
+    puts the stress directly on the face, and the divergence becomes a compact
+    difference of adjacent faces.
+
+    Rolling the fine field by ``-r/2`` before the standard box filter is exactly
+    equivalent to filtering with a box displaced by ``+r/2`` fine cells, which centres
+    it on the face between adjacent coarse cells.
+
+    Parameters
+    ----------
+    rho, vx, vy, p : (Ny, Nx) high-resolution primitive fields
+    r : int — coarsening factor; must be even
+
+    Returns
+    -------
+    tau_x : (Ny//r, Nx//r, 4, 4) — stress at x-faces; index i is the face at i+1/2
+    tau_y : (Ny//r, Nx//r, 4, 4) — stress at y-faces; index j is the face at j+1/2
+    """
+    if r % 2:
+        raise ValueError(f"Face staggering needs an even coarsening factor, got r={r}")
+    half = r // 2
+
+    def _shifted(dim: int) -> torch.Tensor:
+        args = [torch.roll(a, -half, dims=dim) for a in (rho, vx, vy, p)]
+        _, tau = compute_sgs_stress(
+            *args, r=r, project_to_fluid_frame=project_to_fluid_frame,
+        )
+        return tau
+
+    return _shifted(-1), _shifted(-2)
+
+
 # ---------------------------------------------------------------------------
 # PyTorch Dataset
 # ---------------------------------------------------------------------------

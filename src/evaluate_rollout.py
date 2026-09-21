@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils import CRMHD_TBNN
 from src.dataset import (
     read_snapshot, relativistic_favre_filter, GAMMA_EOS, compute_sgs_stress,
+    compute_sgs_stress_on_faces,
 )
 from src.features import extract_tbnn_features
 from src.solver import RHDSolver, compute_transition_sensor, clip_sgs_tensor, clip_backscatter, smooth_sgs_tensor
@@ -688,6 +689,7 @@ class ExactDNSSGSClosure:
         backscatter_clip: str | None = None,
         backscatter_fraction: float = 0.0,
         tau_smooth_passes: int = 0,
+        face_closure: bool = False,
     ):
         self.dx = dx
         self.dy = dy
@@ -699,13 +701,18 @@ class ExactDNSSGSClosure:
         self.backscatter_clip = backscatter_clip
         self.backscatter_fraction = backscatter_fraction
         self.tau_smooth_passes = tau_smooth_passes
+        self.provides_face_stress = face_closure
 
         sorted_snaps = sorted(snapshots, key=lambda s: s["t"])
         self.times = [float(s["t"]) for s in sorted_snaps]
         self.times_np = np.array(self.times, dtype=np.float64)
 
         self.taus: list[torch.Tensor] = []
-        print(f"  [ExactDNSSGSClosure] Precomputing SGS tensors for {len(sorted_snaps)} snapshots...")
+        self.taus_x: list[torch.Tensor] = []
+        self.taus_y: list[torch.Tensor] = []
+        extra = " (+ face-staggered)" if face_closure else ""
+        print(f"  [ExactDNSSGSClosure] Precomputing SGS tensors{extra} "
+              f"for {len(sorted_snaps)} snapshots...")
         for s in sorted_snaps:
             rho = torch.tensor(s["rho"], dtype=dtype, device=device)
             vx = torch.tensor(s["vx"], dtype=dtype, device=device)
@@ -716,9 +723,49 @@ class ExactDNSSGSClosure:
                 rho, vx, vy, p, r=coarsening_factor, project_to_fluid_frame=True,
             )
             self.taus.append(tau)
+            if face_closure:
+                tau_x, tau_y = compute_sgs_stress_on_faces(
+                    rho, vx, vy, p, r=coarsening_factor, project_to_fluid_frame=True,
+                )
+                self.taus_x.append(tau_x)
+                self.taus_y.append(tau_y)
             del rho, vx, vy, p
 
         self.current_t = self.times[0]
+
+    def _interp(self, series: list[torch.Tensor]) -> torch.Tensor:
+        """Linearly interpolate a precomputed per-snapshot series to the current time."""
+        t = self.current_t
+        if t <= self.times[0]:
+            return series[0]
+        if t >= self.times[-1]:
+            return series[-1]
+        idx = int(np.searchsorted(self.times_np, t)) - 1
+        idx = max(0, min(idx, len(self.times) - 2))
+        t0, t1 = self.times[idx], self.times[idx + 1]
+        span = t1 - t0
+        frac = (t - t0) / span if span > 1e-14 else 0.0
+        return (1.0 - frac) * series[idx] + frac * series[idx + 1]
+
+    @torch.no_grad()
+    def faces(self, prims: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Time-interpolated SGS stress at x- and y-faces.
+
+        Only the realizability clip and tau smoothing are applied here; the sensor and
+        backscatter clip act on the cell-centred tensor in __call__, which is what
+        gates delta_U.
+        """
+        if not self.provides_face_stress:
+            raise RuntimeError("this closure was not built with face_closure=True")
+        out = []
+        for series in (self.taus_x, self.taus_y):
+            tau = clip_sgs_tensor(
+                self._interp(series), prims, mode=self.clip_mode, kappa=self.clip_kappa,
+            )
+            if self.tau_smooth_passes:
+                tau = smooth_sgs_tensor(tau, self.tau_smooth_passes)
+            out.append(tau)
+        return out[0], out[1]
 
     def set_time(self, t: float) -> None:
         """Update the current simulation time."""
@@ -788,6 +835,7 @@ def evaluate_rollout(
     backscatter_clip: str | None = None,
     backscatter_fraction: float = 0.0,
     tau_smooth_passes: int = 0,
+    face_closure: bool = False,
     with_unclosed: bool = False,
     save_history: bool = False,
     make_anim: bool = False,
@@ -815,6 +863,9 @@ def evaluate_rollout(
     device_str : 'cuda' or 'cpu'
     skip_exact : bool — skip running exact DNS SGS solver
     backscatter_clip : str or None — None, "zero" or "project" (see clip_backscatter)
+    face_closure : bool — evaluate the exact SGS stress on cell faces (staggered
+        filter boxes) so its divergence is compact, instead of interpolating a
+        cell-centred stress. Exact-DNS closure only.
     with_unclosed : bool — also run a solver with no SGS term, as a control
     save_history : bool — save full trajectory arrays to rollout_trajectory.pt
     make_anim : bool — generate animated comparison GIF
@@ -984,6 +1035,7 @@ def evaluate_rollout(
                 backscatter_clip=backscatter_clip,
                 backscatter_fraction=backscatter_fraction,
                 tau_smooth_passes=tau_smooth_passes,
+                face_closure=face_closure,
             )
             ok_exact = _safe_evolve(
                 solver_exact, "exact",
@@ -1335,6 +1387,11 @@ if __name__ == "__main__":
                         help="Low-pass the SGS stress with an (1,2,1)/4 filter this many times "
                              "before applying it. Removes near-grid-scale tau content that the "
                              "flux divergence can inject but not damp. Try 1 or 2.")
+    parser.add_argument("--face-closure", action="store_true",
+                        help="Evaluate the exact SGS stress on cell faces via staggered filter "
+                             "boxes, making its divergence compact. Without this the stress is "
+                             "cell-centred and interpolated, which has zero response at 2dx. "
+                             "Exact-DNS closure only; requires an even coarsening factor.")
     parser.add_argument("--sgs-coupling", type=str, default="flux", choices=["source", "flux"],
                         help="SGS coupling mode: 'source' (legacy) or 'flux' (conservative viscous flux)")
     parser.add_argument("--save-history", action="store_true", help="Save intermediate snapshot trajectories to rollout_trajectory.pt")
@@ -1358,6 +1415,7 @@ if __name__ == "__main__":
         backscatter_clip=args.backscatter_clip,
         backscatter_fraction=args.backscatter_fraction,
         tau_smooth_passes=args.tau_smooth_passes,
+        face_closure=args.face_closure,
         with_unclosed=args.with_unclosed,
         save_history=args.save_history,
         make_anim=args.make_anim,

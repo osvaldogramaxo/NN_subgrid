@@ -667,6 +667,7 @@ def compute_rhs(
     reconstruct_primitives: bool = True,
     sgs_viscous_Fx: torch.Tensor | None = None,
     sgs_viscous_Fy: torch.Tensor | None = None,
+    sgs_fluxes_on_faces: bool = False,
 ) -> torch.Tensor:
     r"""Compute the right-hand side: -∂_x F^x - ∂_y F^y + S_SGS.
 
@@ -684,6 +685,10 @@ def compute_rhs(
         correction δF^x from the conservative flux formulation.
     sgs_viscous_Fy : (Ny, Nx, 4) tensor or None — viscous SGS y-flux
         correction δF^y from the conservative flux formulation.
+    sgs_fluxes_on_faces : bool — if True the SGS fluxes are already evaluated at
+        interfaces and are differenced directly, which keeps the operator compact.
+        If False (default) they are cell-centred and must be interpolated first,
+        which costs all response at the 2Δ mode.
 
     Returns
     -------
@@ -804,11 +809,11 @@ def compute_rhs(
     # 4th-order face interpolation keeps the SGS flux divergence closer in order to the
     # MP5 ideal flux; a 2-point face average would degrade it to a 2Δ central difference.
     if sgs_viscous_Fx is not None:
-        face_Fx = _face_interp4(sgs_viscous_Fx, dim=-2)
+        face_Fx = sgs_viscous_Fx if sgs_fluxes_on_faces else _face_interp4(sgs_viscous_Fx, dim=-2)
         rhs = rhs - (face_Fx - torch.roll(face_Fx, 1, dims=-2)) / dx
 
     if sgs_viscous_Fy is not None and Ny > 1:
-        face_Fy = _face_interp4(sgs_viscous_Fy, dim=-3)
+        face_Fy = sgs_viscous_Fy if sgs_fluxes_on_faces else _face_interp4(sgs_viscous_Fy, dim=-3)
         rhs = rhs - (face_Fy - torch.roll(face_Fy, 1, dims=-3)) / dy
 
     return rhs
@@ -1469,10 +1474,30 @@ class RHDSolver:
         """
         p_n = self.prims[..., 3]
 
+        # A closure may set provides_face_stress and expose .faces(prims) -> (tau_x, tau_y),
+        # giving the stress directly at interfaces. The flux divergence is then a compact
+        # difference of adjacent faces instead of an interpolation that is blind to
+        # the 2Δ mode. delta_U stays cell-centred either way: it is the time-derivative
+        # term, not a flux.
+        on_faces = bool(getattr(sgs_closure, "provides_face_stress", False))
+
         def _sgs(prims_k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             tau_perp_k, alpha_k = sgs_closure(prims_k)
-            tau_eff_k = alpha_k.unsqueeze(-1).unsqueeze(-1) * tau_perp_k
-            return compute_sgs_viscous_fluxes(prims_k, tau_eff_k)
+            alpha4_k = alpha_k.unsqueeze(-1).unsqueeze(-1)
+            delta_U_k, delta_Fx_k, delta_Fy_k = compute_sgs_viscous_fluxes(
+                prims_k, alpha4_k * tau_perp_k,
+            )
+            if not on_faces:
+                return delta_U_k, delta_Fx_k, delta_Fy_k
+
+            tau_x_k, tau_y_k = sgs_closure.faces(prims_k)
+            prims_xf = 0.5 * (prims_k + torch.roll(prims_k, -1, dims=-2))
+            prims_yf = 0.5 * (prims_k + torch.roll(prims_k, -1, dims=-3))
+            alpha_xf = 0.5 * (alpha4_k + torch.roll(alpha4_k, -1, dims=-3))
+            alpha_yf = 0.5 * (alpha4_k + torch.roll(alpha4_k, -1, dims=-4))
+            _, delta_Fx_k, _ = compute_sgs_viscous_fluxes(prims_xf, alpha_xf * tau_x_k)
+            _, _, delta_Fy_k = compute_sgs_viscous_fluxes(prims_yf, alpha_yf * tau_y_k)
+            return delta_U_k, delta_Fx_k, delta_Fy_k
 
         def _recover(
             U_tilde: torch.Tensor,
@@ -1509,6 +1534,7 @@ class RHDSolver:
                 prims_k, self.dx, self.dy,
                 sgs_viscous_Fx=delta_Fx_k,
                 sgs_viscous_Fy=delta_Fy_k,
+                sgs_fluxes_on_faces=on_faces,
                 reconstruction=self.reconstruction,
                 riemann_solver=self.riemann_solver,
                 reconstruct_primitives=self.reconstruct_primitives,

@@ -33,3 +33,4 @@ transferwee/
 # Scratch: keep the diagnostic tooling, drop the rest
 scratch/*
 !scratch/diagnose_divergence.py
+!scratch/phase0_face_closure.py

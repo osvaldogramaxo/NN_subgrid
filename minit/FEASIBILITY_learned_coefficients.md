@@ -643,3 +643,41 @@ Pooled, whole window $t = 1.5$–10:
    up to ±0.04. This is effectively **two** independent samples (the DNS realisations), so the
    errors above understate the real spread. More DNS seeds, or perturbations of ~1e-2, are
    needed before any long-rollout ranking.
+
+
+---
+
+## 19. Ensemble at 1% perturbation: MiNNit is the best learned closure in long rollouts; the hybrid can diverge (2026-10-19)
+
+`condor_ensemble_p1e-2.sub`: as §18 with `--perturb-amplitude 0.01` (seed-0 members reused).
+Members now genuinely diverge: density correlation with the unperturbed member at
+$t = 3 / 6 / 10$ is 0.99 / 0.59–0.94 / **0.08–0.83**, against 1.00 / 0.99 / 0.80–0.98 at 1e-3.
+
+**The hybrid diverged** (non-finite state at $t = 5.37$) in `dns_khi` member 2 — 1 of 14
+hybrid rollouts over both ensembles; no other closure diverged. Untested hypothesis: the
+cell-by-cell rescale is applied *after* the TBNN closure's realizability clip, and where
+$e_\text{TBNN}$ sits just above the 5% fallback floor the factor can reach ~20×, so the hybrid
+stress is unbounded. Candidate fix: clip after rescaling.
+
+Pooled, $t = 1.5$–10 (7 hybrid members):
+
+| run | log-spectral distance | total KE | high band / oracle |
+|---|---|---|---|
+| oracle | 0.577 ± 0.010 | 0.989 ± 0.010 | 1 |
+| unclosed | 0.581 ± 0.015 | 0.944 ± 0.025 | 1.04 ± 0.04 |
+| MiNNit | 0.595 ± 0.008 | 0.985 ± 0.011 | 1.00 ± 0.01 |
+| TBNN | 0.612 ± 0.014 | 0.980 ± 0.015 | 0.97 ± 0.03 |
+| hybrid | 0.619 ± 0.009 | 0.978 ± 0.009 | 0.94 ± 0.02 |
+
+1. **Even the exact stress barely beats no closure on spectral distance** (0.577 vs 0.581).
+   On this solver the sub-grid term is a small correction to the long-time spectrum.
+2. **MiNNit is the best learned closure:** paired against the hybrid it is closer to the DNS in
+   7/7 members (+0.021 ± 0.004), and against the TBNN by 0.017. The hybrid and the TBNN tie
+   (+0.001 ± 0.009).
+3. **On the unseen run the closures fix a real energy loss.** Without a closure, total KE
+   falls to 0.82 late; MiNNit keeps it at 1.005 ± 0.015 with late spectral distance 0.718,
+   closest to the oracle's 0.700 (TBNN 0.782, hybrid 0.753, unclosed 0.778).
+4. **This reverses the a-priori ranking.** A-priori the hybrid wins every metric and MiNNit has
+   the lowest correlation; over one 0.1 interval the TBNN and hybrid beat MiNNit; in long
+   rollouts MiNNit is best and the hybrid is worst and least stable. A-priori and short-horizon
+   scores do not predict long-rollout quality here.

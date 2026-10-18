@@ -1,0 +1,21 @@
+# Step 1b: rollout ensemble at 1% perturbation (seed-0 members are reused from results/ensemble). 2 DNS realisations x 4 initial-state perturbations, each
+# running unclosed / TBNN / MiNNit / hybrid / oracle from the same perturbed state.
+# Models trained on dns_khi only, so dns_khi_s1 is unseen for all of them.
+universe       = vanilla
+executable     = ./run_evaluate.sh
+arguments      = "$(data) 16 checkpoints_r16/best_model.pt 1.0 10.0 cuda 0.75 mp5 hllc --with-unclosed --save-history --anim-interval 0.1 --with-learned results/minit/minit_coeff_residual.pt --with-hybrid results/minit/minit_coeff_residual.pt --perturb-seed $(seed) --perturb-amplitude 0.01 --output-dir results/ensemble_p1e-2/$(data)_s$(seed)"
+output         = ./condor_logs/ens1e2_$(Cluster)_$(data)_s$(seed).out
+error          = ./condor_logs/ens1e2_$(Cluster)_$(data)_s$(seed).err
+log            = ./condor_logs/ens1e2_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 24576
+request_gpus   = 1
+queue data,seed from (
+  dns_khi, 1
+  dns_khi, 2
+  dns_khi, 3
+  dns_khi_s1, 1
+  dns_khi_s1, 2
+  dns_khi_s1, 3
+)

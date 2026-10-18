@@ -48,21 +48,59 @@ class CovariantTensorLoss(nn.Module):
 
     where :math:`\lVert A \rVert_F^2 = g_{\mu\alpha} g_{\nu\beta} A^{\mu\nu} A^{\alpha\beta}`.
 
+    The normalization is **per point**, which is what makes this loss differ
+    from plain MSE: every cell contributes an O(1) relative error regardless of
+    its subgrid intensity, so the gradient is not monopolised by the handful of
+    cells with the largest :math:`\lVert \tau \rVert_F`. On `dns_khi` at t = 4
+    the per-cell Frobenius norm spans mean 7.3e-3 to max 4.7e-1 — a factor of
+    65 — so a batch-level normalizer (the earlier behaviour) reduced this to
+    MSE times a constant and starved the low-intensity 99% of the domain.
+
+    The price of per-point normalization is the opposite bias: quasi-laminar
+    cells, where :math:`\lVert \tau_{\text{DNS}} \rVert_F \to 0`, would be
+    amplified without bound. The denominator therefore carries a floor taken
+    from the training distribution of :math:`\lVert \tau \rVert_F`, not an
+    absolute constant.
+
+    The floor is worth setting from a *quantile*, because the distribution is
+    heavy-tailed: over the `dns_khi` training window the mean is 5.2x the
+    median. Measured share of the loss carried by the weakest and strongest
+    deciles (uniform absolute error, i.e. the regime at initialization):
+
+    ==================  =============  ===============
+    floor               weakest 10%    strongest 10%
+    ==================  =============  ===============
+    0.05 x mean            43.0%           0.01%
+    median (0.2 x mean)    20.0%           0.05%
+    0.5 x mean             14.5%           0.24%
+    batch-level (old)      ~0%            dominant
+    ==================  =============  ===============
+
+    The median is the default: it damps the below-median half of the domain
+    while leaving the resolved-turbulence cells in charge of the gradient.
+
     Parameters
     ----------
     epsilon : float
-        Regularizer preventing singularity in quasi-laminar regions.
+        Last-resort floor, used only when neither ``tau_floor`` nor
+        ``tau_scale`` is supplied.
+    floor_frac : float
+        Fallback floor as a fraction of ``tau_scale``, used when no explicit
+        ``tau_floor`` is given.
     """
 
-    def __init__(self, epsilon: float = 1e-8):
+    def __init__(self, epsilon: float = 1e-8, floor_frac: float = 0.2):
         super().__init__()
         self.epsilon = epsilon
+        self.floor_frac = floor_frac
 
     def forward(
         self,
         tau_pred: torch.Tensor,
         tau_dns: torch.Tensor,
         g_cov: torch.Tensor,
+        tau_scale: torch.Tensor | float | None = None,
+        tau_floor: torch.Tensor | float | None = None,
     ) -> torch.Tensor:
         """
         Parameters
@@ -70,6 +108,21 @@ class CovariantTensorLoss(nn.Module):
         tau_pred : (..., 4, 4) — predicted SGS stress τ^{μν}
         tau_dns  : (..., 4, 4) — ground truth SGS stress τ^{μν}_DNS
         g_cov    : (4, 4) or (..., 4, 4) — metric tensor g_{μν}
+        tau_floor : scalar **or tensor broadcastable over the leading dims** —
+            ‖τ‖_F below which a cell stops being normalized, in physical units.
+            Preferred: a quantile of the training distribution (the median by
+            default).
+
+            A *per-snapshot* floor is strongly preferred over a global one
+            whenever the training window spans a range over which the subgrid
+            intensity changes a lot. ‖τ‖_F varies ~40x across ``dns_khi``
+            (t = 0..20), so one global floor puts nearly every cell of the weak
+            snapshots below it, where this term degenerates into an absolute
+            MSE and predicting zero becomes near-optimal. That is precisely how
+            a model ends up with the right stress in mid-run and a collapsed one
+            at late times.
+        tau_scale : scalar — dataset-level mean ‖τ_DNS‖_F. Used with
+            ``floor_frac`` when ``tau_floor`` is not given.
         """
         diff = tau_pred - tau_dns
 
@@ -81,9 +134,22 @@ class CovariantTensorLoss(nn.Module):
         dns_low = torch.einsum("...ma,...nb,...ab->...mn", g_cov, g_cov, tau_dns)
         frob_dns = torch.clamp(torch.einsum("...mn,...mn->...", tau_dns, dns_low), min=0.0)
 
-        # Batch-averaged Frobenius regression normalized by batch DNS intensity.
-        # This prevents catastrophic division-by-zero spikes in laminar / quiescent regions.
-        return frob_diff.mean() / (frob_dns.mean() + self.epsilon)
+        if tau_floor is not None:
+            if isinstance(tau_floor, torch.Tensor):
+                # Broadcast against the per-point frob_* fields, which have the
+                # leading dims of tau with the two tensor axes reduced away.
+                floor = tau_floor.to(frob_dns.device, frob_dns.dtype) ** 2
+                while floor.dim() > frob_dns.dim():
+                    floor = floor.squeeze(-1)
+            else:
+                floor = float(tau_floor) ** 2
+        elif tau_scale is not None:
+            floor = (self.floor_frac * float(tau_scale)) ** 2
+        else:
+            floor = self.epsilon
+
+        # Per-point relative Frobenius error, then averaged.
+        return (frob_diff / (frob_dns + floor)).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +170,12 @@ class DissipationRateLoss(nn.Module):
 
     where :math:`\mathcal{P}_{\text{SGS}} = -\tau^{\mu\nu} \nabla_\mu \bar{u}_\nu`.
 
+    Both terms are divided by a production scale so that the component is
+    dimensionless and comparable across datasets and coarsening factors.
+    :math:`\mathcal{P}` carries units of :math:`\tau \nabla u`, so an
+    unnormalized L1 term silently rescales α whenever the subgrid intensity
+    changes — which it does by a factor of ~40 over the course of this KHI run.
+
     Parameters
     ----------
     lambda_stab : float
@@ -119,6 +191,7 @@ class DissipationRateLoss(nn.Module):
         tau_pred: torch.Tensor,
         tau_dns: torch.Tensor,
         grad_u_cov: torch.Tensor,
+        p_scale: torch.Tensor | float | None = None,
     ) -> torch.Tensor:
         """
         Parameters
@@ -128,17 +201,28 @@ class DissipationRateLoss(nn.Module):
         grad_u_cov  : (..., 4, 4) — velocity gradient ∇_ν u_μ
                       Convention: grad_u_cov[..., ν, μ] = ∂_ν u_μ
                       So ∂_μ u_ν = grad_u_cov[..., μ, ν]
+        p_scale     : scalar — dataset-level |P_DNS| scale used to make the
+                      component dimensionless. When None, falls back to the
+                      current batch's |P_DNS| mean (detached), which keeps the
+                      term O(1) but makes it batch-dependent.
         """
         # P_SGS = -τ^{μν} ∇_μ u_ν = -τ^{μν} grad_u_cov[μ, ν]
         P_pred = -torch.einsum("...mn,...mn->...", tau_pred, grad_u_cov)
         P_dns = -torch.einsum("...mn,...mn->...", tau_dns, grad_u_cov)
 
-        # L1 matching of local production rates
-        l1_match = torch.abs(P_pred - P_dns).mean()
+        if p_scale is None:
+            scale = P_dns.abs().mean().detach().clamp(min=1e-30)
+        else:
+            scale = torch.as_tensor(
+                float(p_scale), dtype=P_dns.dtype, device=P_dns.device
+            ).clamp(min=1e-30)
+
+        # L1 matching of local production rates, in units of the P scale
+        l1_match = (torch.abs(P_pred - P_dns) / scale).mean()
 
         # Global stability barrier: penalize net anti-dissipation
         # (negative mean production → energy flowing from subgrid to resolved)
-        stability = self.lambda_stab * torch.relu(-P_pred.mean())
+        stability = self.lambda_stab * torch.relu(-P_pred.mean() / scale)
 
         return l1_match + stability
 
@@ -160,15 +244,51 @@ class SpectralCascadeLoss(nn.Module):
 
     Requires spatially structured 2D grid data (Ny, Nx, 4, 4).
 
+    The log floor is **relative** to the DNS spectrum, not an absolute
+    constant. An absolute floor is a scale trap here: the unnormalized FFT
+    power of τ ~ 1e-3 on a 64² grid lands around 1e-8·N⁴, so a fixed 1e-12
+    floor is either irrelevant or dominant depending only on grid size and
+    subgrid intensity. Worse, at initialization the predicted spectrum can sit
+    many decades below the DNS one in the high-k shells, and log10 of a
+    near-zero spectrum produces a gradient spike that is pure noise. Flooring
+    at ``epsilon_rel`` times the mean DNS shell power bounds the log residual
+    at roughly ``|log10 epsilon_rel|`` per shell.
+
     Parameters
     ----------
+    epsilon_rel : float
+        Floor as a fraction of the mean DNS shell power (detached). 1e-8 caps
+        a single shell's contribution at (8 decades)² regardless of units.
     epsilon : float
-        Floor added to spectrum before taking log to prevent -inf.
+        Absolute floor, still added for exact-zero safety.
+    k_min : int
+        First shell included. 1 keeps everything above the DC bin.
+    highk_tilt : float
+        Exponent of a per-shell weight ``(k / k_min) ** highk_tilt`` applied to
+        the log residual before averaging. ``0.0`` (default) weights every shell
+        equally, which is the behaviour this term has always had.
+
+        Why it exists: the term as written treats a decade of error at k = 2 and
+        at k = 30 identically, but the resolved field's small scales are what a
+        closure is for, and the trained model's stress carries ~38% of its power
+        above k = 16 against ~51% for the exact stress. A positive tilt buys
+        that deficit at the cost of the large scales, which the point-wise terms
+        already constrain well. Weights are normalised to mean 1 so the tilt
+        does not silently rescale the term against ``beta``.
     """
 
-    def __init__(self, epsilon: float = 1e-12):
+    def __init__(
+        self,
+        epsilon: float = 1e-30,
+        epsilon_rel: float = 1e-8,
+        k_min: int = 1,
+        highk_tilt: float = 0.0,
+    ):
         super().__init__()
         self.epsilon = epsilon
+        self.epsilon_rel = epsilon_rel
+        self.k_min = max(1, int(k_min))
+        self.highk_tilt = float(highk_tilt)
 
     def _shell_spectrum(self, field_2d: torch.Tensor) -> torch.Tensor:
         """Compute radially (shell) averaged 2D power spectrum.
@@ -214,8 +334,8 @@ class SpectralCascadeLoss(nn.Module):
 
         spectrum = spectrum / counts.clamp(min=1)
 
-        # Return k=1..k_max-1, add epsilon for log safety
-        return spectrum[1:] + self.epsilon
+        # Return k=k_min..k_max-1 (DC bin excluded by construction)
+        return spectrum[self.k_min:] + self.epsilon
 
     def forward(
         self,
@@ -237,9 +357,24 @@ class SpectralCascadeLoss(nn.Module):
         E_pred = self._shell_spectrum(pred_c)
         E_dns = self._shell_spectrum(dns_c)
 
+        # Relative log floor: bounds the residual of any single shell, and
+        # keeps the component invariant under a rescaling of τ.
+        floor = self.epsilon_rel * E_dns.mean().detach()
+
         # Log-space L2 matching
-        log_diff = torch.log10(E_pred) - torch.log10(E_dns)
-        return (log_diff ** 2).mean()
+        log_diff = torch.log10(E_pred + floor) - torch.log10(E_dns + floor)
+        sq = log_diff ** 2
+
+        if self.highk_tilt != 0.0:
+            k = torch.arange(
+                self.k_min, self.k_min + sq.shape[-1],
+                device=sq.device, dtype=sq.dtype,
+            )
+            w = (k / self.k_min) ** self.highk_tilt
+            w = w / w.mean()          # mean 1, so beta keeps its meaning
+            sq = sq * w
+
+        return sq.mean()
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +395,19 @@ class OrthogonalityLoss(nn.Module):
                 g_{\nu\lambda}
                 \left( \bar{u}_\mu \tau_{\text{pred}}^{\mu\nu} \right)
                 \left( \bar{u}_\alpha \tau_{\text{pred}}^{\alpha\lambda} \right)
+
+    .. warning::
+       For the current model this term is **identically zero and contributes no
+       gradient**. ``CRMHD_TBNN`` forms its output as
+       :math:`\tau^{\mu\nu} = \sum_n G^{(n)} E^{(n)\mu\nu}`, and the basis
+       tensors from ``extract_tbnn_features`` satisfy
+       :math:`\bar{u}_\mu E^{(n)\mu\nu} = 0` to machine precision (measured:
+       3e-16 relative on `dns_khi` at t = 4). Both projections therefore vanish
+       by construction for *any* coefficients. The default weight γ is 0 for
+       that reason — the constraint is enforced by the architecture, not by the
+       loss. Keep the class: it is the right diagnostic to run if the basis or
+       the output head ever stops being rest-frame spatial (e.g. if the unused
+       ``p_sgs`` head is wired into the stress).
     """
 
     def forward(
@@ -317,13 +465,32 @@ class WECLoss(nn.Module):
 
     Parameters
     ----------
+    The hinge is on the **ratio** to the resolved energy density, not on the
+    absolute value. An absolute ``relu(-ε_eff)`` cannot activate on this
+    problem: the resolved comoving energy density :math:`\rho h - p` is ≥ 2.1
+    (mean 9.3) on `dns_khi` at t = 4, while the largest exact
+    :math:`\lVert\tau\rVert_F` in the domain is 0.47 — a 5× margin — so the
+    term sat at exactly 0.0 for every epoch of the previous run and δ bought
+    nothing. Penalising :math:`\varepsilon_{\text{eff}} < \text{margin} \cdot
+    \varepsilon_{\text{resolved}}` instead gives a constraint that is inactive
+    on the DNS labels but bites on a prediction that starts eating the resolved
+    energy density, which is the failure mode that actually ends a rollout.
+
+    Parameters
+    ----------
     gamma_eos : float
-        Adiabatic index Γ for the ideal gas EOS.
+        Adiabatic index Γ for the ideal gas EOS. Must match the data; pass the
+        value resolved by ``src.config``, never a literal.
+    margin : float
+        Fraction of the resolved comoving energy density that the effective
+        energy density must retain. 0.0 recovers the plain (unreachable) WEC;
+        0.5 penalises an SGS stress that removes more than half of it.
     """
 
-    def __init__(self, gamma_eos: float = 4.0 / 3.0):
+    def __init__(self, gamma_eos: float = 4.0 / 3.0, margin: float = 0.5):
         super().__init__()
         self.gamma = gamma_eos
+        self.margin = margin
 
     def forward(
         self,
@@ -356,14 +523,17 @@ class WECLoss(nn.Module):
         T_resolved = (rho_h.unsqueeze(-1).unsqueeze(-1) * uu
                       + p.unsqueeze(-1).unsqueeze(-1) * g_cov)
 
-        T_eff = T_resolved + tau_pred
-
-        # Energy density observed by comoving fluid: ε = T_eff^{μν} u_μ u_ν
+        # Energy density observed by comoving fluid: ε = T^{μν} u_μ u_ν
         u_cov = torch.einsum("...ij,...j->...i", g_cov, u_con)
-        energy_density = torch.einsum("...mn,...m,...n->...", T_eff, u_cov, u_cov)
+        e_resolved = torch.einsum("...mn,...m,...n->...", T_resolved, u_cov, u_cov)
+        e_sgs = torch.einsum("...mn,...m,...n->...", tau_pred, u_cov, u_cov)
+        e_eff = e_resolved + e_sgs
 
-        # Penalize negative energy density
-        return torch.relu(-energy_density).mean()
+        # Relative hinge: require ε_eff >= margin * ε_resolved.
+        # Normalising by ε_resolved makes the term dimensionless and, unlike
+        # relu(-ε_eff), reachable — see the class docstring.
+        denom = e_resolved.detach().abs().clamp(min=1e-30)
+        return torch.relu(self.margin - e_eff / denom).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +554,12 @@ class RMHDSGSLoss(nn.Module):
     :meth:`forward`.  The spectral loss requires spatially structured 2D
     grid data and is computed separately via :meth:`compute_spectral`.
 
+    Every component is dimensionless, so the weights mean the same thing
+    across datasets, coarsening factors and flow regimes. That requires the
+    dataset-level scales ``tau_scale`` and ``p_scale``: set them once with
+    :meth:`set_scales` (the training entry point does this) and they are
+    threaded into the components that need them.
+
     Parameters
     ----------
     alpha : float
@@ -391,29 +567,41 @@ class RMHDSGSLoss(nn.Module):
     beta : float
         Weight for spectral cascade loss.
     gamma : float
-        Weight for orthogonality constraint loss.
+        Weight for orthogonality constraint loss. **Default 0**: the term is
+        identically zero for this architecture — see :class:`OrthogonalityLoss`.
     delta : float
         Weight for WEC realizability loss.
     lambda_stab : float
         Global anti-dissipation barrier strength in L_P.
     tensor_epsilon : float
-        Regularizer ε for the covariant tensor loss normalization.
-    spectral_epsilon : float
-        Floor ε for power spectrum before log.
+        Fallback denominator floor for the tensor loss, used only when no
+        ``tau_scale`` has been set.
+    tensor_floor_frac : float
+        Per-point denominator floor as a fraction of ``tau_scale``.
+    spectral_epsilon_rel : float
+        Spectral log floor as a fraction of the mean DNS shell power.
+    wec_margin : float
+        Fraction of resolved comoving energy density the prediction must
+        retain before L_WEC activates.
     gamma_eos : float
-        Adiabatic index Γ for the ideal gas EOS.
+        Adiabatic index Γ for the ideal gas EOS. Pass the value resolved by
+        ``src.config`` from the dataset metadata; the default here is only a
+        fallback and a wrong Γ corrupts L_P and L_WEC silently.
     """
 
     def __init__(
         self,
         alpha: float = 0.5,
         beta: float = 0.1,
-        gamma: float = 5.0,
+        gamma: float = 0.0,
         delta: float = 2.0,
         lambda_stab: float = 10.0,
         tensor_epsilon: float = 1e-8,
-        spectral_epsilon: float = 1e-12,
+        tensor_floor_frac: float = 0.05,
+        spectral_epsilon_rel: float = 1e-8,
+        wec_margin: float = 0.5,
         gamma_eos: float = 4.0 / 3.0,
+        spectral_highk_tilt: float = 0.0,
     ):
         super().__init__()
         self.alpha = alpha
@@ -421,11 +609,46 @@ class RMHDSGSLoss(nn.Module):
         self.gamma_w = gamma      # 'gamma' conflicts with EOS gamma
         self.delta = delta
 
-        self.tensor_loss = CovariantTensorLoss(epsilon=tensor_epsilon)
+        self.tensor_loss = CovariantTensorLoss(
+            epsilon=tensor_epsilon, floor_frac=tensor_floor_frac
+        )
         self.dissipation_loss = DissipationRateLoss(lambda_stab=lambda_stab)
-        self.spectral_loss = SpectralCascadeLoss(epsilon=spectral_epsilon)
+        self.spectral_loss = SpectralCascadeLoss(
+            epsilon_rel=spectral_epsilon_rel, highk_tilt=spectral_highk_tilt,
+        )
         self.ortho_loss = OrthogonalityLoss()
-        self.wec_loss = WECLoss(gamma_eos=gamma_eos)
+        self.wec_loss = WECLoss(gamma_eos=gamma_eos, margin=wec_margin)
+
+        #: dataset-level scales, set by :meth:`set_scales`
+        self.tau_scale: float | None = None
+        self.p_scale: float | None = None
+        #: scalar, or a per-point tensor when a per-snapshot floor is in use
+        self.tau_floor: float | torch.Tensor | None = None
+
+    def set_scales(
+        self,
+        tau_scale: torch.Tensor | float | None = None,
+        p_scale: torch.Tensor | float | None = None,
+        tau_floor: torch.Tensor | float | None = None,
+    ) -> None:
+        """Bind the dataset-level τ and P scales used to keep terms dimensionless.
+
+        Both must come from the *training* split only, so that validation and
+        test numbers are measured on the same yardstick rather than each split
+        normalizing itself (which is what made the previous run's train and
+        val ``L_tensor`` incomparable — 0.199 vs 0.020 with no overfitting
+        involved, just different denominators).
+        """
+        if tau_scale is not None:
+            self.tau_scale = float(tau_scale)
+        if p_scale is not None:
+            self.p_scale = float(p_scale)
+        if tau_floor is not None:
+            # Kept as a tensor when one is given, so a per-snapshot floor
+            # survives instead of being collapsed to a single number.
+            self.tau_floor = (
+                tau_floor if isinstance(tau_floor, torch.Tensor) else float(tau_floor)
+            )
 
     def forward(
         self,
@@ -436,6 +659,7 @@ class RMHDSGSLoss(nn.Module):
         g_cov: torch.Tensor,
         rho: torch.Tensor,
         p: torch.Tensor,
+        tau_floor: torch.Tensor | float | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute the point-wise composite loss (excludes spectral term).
 
@@ -448,6 +672,9 @@ class RMHDSGSLoss(nn.Module):
         g_cov       : (4, 4)      — metric tensor g_{μν}
         rho         : (...)       — rest-mass density
         p           : (...)       — thermal pressure
+        tau_floor   : optional per-point floor for this batch, overriding the
+            one bound by :meth:`set_scales`. This is how a per-snapshot floor
+            is supplied, since it differs from batch to batch.
 
         Returns
         -------
@@ -456,20 +683,31 @@ class RMHDSGSLoss(nn.Module):
         components : dict[str, float]
             Individual loss component values for logging.
         """
-        L_tensor = self.tensor_loss(tau_pred, tau_dns, g_cov)
-        L_P = self.dissipation_loss(tau_pred, tau_dns, grad_u_cov)
-        L_ortho = self.ortho_loss(tau_pred, u_con, g_cov)
+        L_tensor = self.tensor_loss(
+            tau_pred, tau_dns, g_cov,
+            tau_scale=self.tau_scale,
+            tau_floor=self.tau_floor if tau_floor is None else tau_floor,
+        )
+        L_P = self.dissipation_loss(tau_pred, tau_dns, grad_u_cov, p_scale=self.p_scale)
         L_wec = self.wec_loss(tau_pred, u_con, rho, p, g_cov)
 
-        total = (L_tensor
-                 + self.alpha * L_P
-                 + self.gamma_w * L_ortho
-                 + self.delta * L_wec)
+        total = L_tensor + self.alpha * L_P + self.delta * L_wec
+
+        # L_ortho is identically zero for a basis-contracted output, so it is
+        # skipped entirely unless γ > 0 — computing it costs two einsums per
+        # batch to always produce 0.0. Set --loss-gamma > 0 to re-enable it as
+        # a diagnostic.
+        if self.gamma_w != 0.0:
+            L_ortho = self.ortho_loss(tau_pred, u_con, g_cov)
+            total = total + self.gamma_w * L_ortho
+            ortho_val = L_ortho.item()
+        else:
+            ortho_val = 0.0
 
         components = {
             "L_tensor": L_tensor.item(),
             "L_P": L_P.item(),
-            "L_ortho": L_ortho.item(),
+            "L_ortho": ortho_val,
             "L_WEC": L_wec.item(),
         }
 
@@ -496,3 +734,20 @@ class RMHDSGSLoss(nn.Module):
         """
         L_spec = self.spectral_loss(tau_pred_2d, tau_dns_2d)
         return self.beta * L_spec, L_spec.item()
+
+    def spectral_term(
+        self,
+        tau_pred_2d: torch.Tensor,
+        tau_dns_2d: torch.Tensor,
+    ) -> torch.Tensor:
+        """β · L_spectral as a differentiable scalar, for summing into the
+        point-wise objective before a single ``backward()``.
+
+        Prefer this over :meth:`compute_spectral` inside a training step. The
+        earlier code path ran ``compute_spectral`` in its own pass with its own
+        ``zero_grad``/``backward``/``step`` at the end of each epoch, which made
+        the last update of every epoch a spectral-only gradient estimated from
+        four random snapshots — measured CV of 44% on the reported value, and
+        the dominant source of epoch-to-epoch validation noise.
+        """
+        return self.beta * self.spectral_loss(tau_pred_2d, tau_dns_2d)

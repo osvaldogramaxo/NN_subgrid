@@ -1,0 +1,11 @@
+universe       = vanilla
+executable     = ./run_couplesweep.sh
+arguments      = "source $(cfl)"
+output         = ./condor_logs/cfl_$(Cluster)_$(cfl).out
+error          = ./condor_logs/cfl_$(Cluster)_$(cfl).err
+log            = ./condor_logs/cfl_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+queue cfl in (0.50, 0.85, 0.95)

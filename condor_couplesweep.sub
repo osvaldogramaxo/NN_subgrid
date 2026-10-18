@@ -1,0 +1,15 @@
+universe       = vanilla
+executable     = ./run_couplesweep.sh
+arguments      = "$(coupling) $(cfl)"
+output         = ./condor_logs/couple_$(Cluster)_$(coupling)_$(cfl).out
+error          = ./condor_logs/couple_$(Cluster)_$(coupling)_$(cfl).err
+log            = ./condor_logs/couple_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+queue coupling,cfl from (
+  flux, 0.75
+  source, 0.30
+  flux, 0.30
+)

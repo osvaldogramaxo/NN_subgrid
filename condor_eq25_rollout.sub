@@ -1,0 +1,12 @@
+# Eq.25-loss A/B for MiNNit: does the a-priori gain show up in rollout high-k?
+universe       = vanilla
+executable     = ./run_evaluate.sh
+arguments      = "dns_khi 16 checkpoints_r16/best_model.pt 1.0 10.0 cuda 0.75 mp5 hllc --with-unclosed --skip-exact --with-learned results/minit/minit_coeff_residual.pt --with-learned results/minit/minit_coeff_eq25w5.pt --output-dir results/eq25_rollout"
+output         = ./condor_logs/eq25roll_$(Cluster).out
+error          = ./condor_logs/eq25roll_$(Cluster).err
+log            = ./condor_logs/eq25roll_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+queue 1

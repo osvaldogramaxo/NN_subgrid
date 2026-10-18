@@ -1,0 +1,55 @@
+# ==============================================================================
+# condor_train_fullrange.sub
+# CRMHD-TBNN training over the FULL dns_khi time range, with per-snapshot
+# L_tensor floors.
+#
+# Why this run exists
+# -------------------
+# The previous model (checkpoints/best_model.pt) was trained on t in [1, 6.4]
+# while the rollout it is judged on runs to t = 20 -- the defaults predate the
+# DNS being extended past t = 8. Measured on clean filtered DNS, its stress is
+# fine to t ~ 12 and then collapses: by t = 20 it has 40% of the right
+# amplitude, 19% of the right high-k content (against 49% for the exact stress)
+# and delivers 11% of the true energy transfer. That is why the rollout's
+# high-k band ratio decays to 0.12 while the exact-DNS oracle holds 0.33.
+#
+# Two coupled changes, which have to go together:
+#   1. --time-range 1.0 20.0     : train on the regime the rollout explores.
+#   2. --tensor-floor-scope snapshot : L_tensor normalises by
+#      ||tau_DNS||^2 + floor^2, and ||tau||_F varies ~40x across t = 0..20. One
+#      global floor puts every cell of the weak snapshots below it, where the
+#      term degenerates to an absolute MSE and predicting zero is near-optimal.
+#      Extending the window with a global floor would make the collapse worse,
+#      not better.
+#
+# No internal test window: with training over the whole run there is no later
+# time to hold out, so the honest test is the independent realisation being
+# generated into dns_khi_s1/ (different seed). Evaluate against that, not
+# against a band of this run.
+#
+# loss-beta is left at its default 0.1 so this is a single coherent change
+# against the previous model; raise it only after measuring what this run does
+# to the tau high-k deficit (38% vs 51% for the exact stress).
+# ==============================================================================
+
+universe       = vanilla
+executable     = ./run_train.sh
+
+# <data_dir> <r> <stride> <epochs> <snapshots_per_batch> <lr> <device> <plot_interval> [patience] [extra...]
+arguments      = "dns_khi_s1 16 1 2500 2 1e-4 cuda 10 200 --time-range 1.0 20.0 --test-time 0 0 --tensor-floor-scope snapshot --resume --reset-lr --reset-best"
+
+environment    = "CHECKPOINT_DIR=checkpoints_fullrange"
+
+output         = ./condor_logs/train_fr_$(Cluster)_$(Process).out
+error          = ./condor_logs/train_fr_$(Cluster)_$(Process).err
+log            = ./condor_logs/train_fr_$(Cluster)_$(Process).log
+
+getenv         = True
+
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+
+#+UseNvidiaA100 = True
+
+queue 1

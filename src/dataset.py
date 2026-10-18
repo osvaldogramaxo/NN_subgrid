@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import glob
 import os
-import warnings
 from pathlib import Path
 
 import h5py
@@ -35,10 +34,16 @@ from torch.utils.data import Dataset, DataLoader
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-GAMMA_EOS = 4.0 / 3.0  # Adiabatic index for ideal gas EOS (Γ = 4/3)
+#: Adiabatic index for the ideal-gas EOS. This is a *fallback only*: it is
+#: rebound at runtime by ``src.config.Config.apply`` from the value resolved
+#: for the dataset in use, and dataset metadata outranks the config file. The
+#: default is 4/3, matching SRHD data produced by ``src/generate_dns.py``
+#: (``dns_khi`` records ``eos_gamma = 1.3333...`` in its own metadata). The
+#: legacy ``test1/`` snapshots are Newtonian with 5/3 and carry no metadata,
+#: so they need ``--gamma 1.6666666666666667`` or the config value.
+#: Never read this without having called ``configure()`` first.
+GAMMA_EOS = 4.0 / 3.0
 GHOST = 3               # Number of ghost cells on each boundary
-V_MAX_SQ = 0.98         # Repair target for unphysical cells (W ≈ 7.08); matches the
-                        # ceiling relativistic_favre_filter already applies.
 
 
 # ---------------------------------------------------------------------------
@@ -59,36 +64,41 @@ def read_snapshot(filepath: str | Path) -> dict[str, np.ndarray]:
         t   : float, simulation time
     """
     with h5py.File(filepath, "r") as f:
+        t = float(f["Parameters"]["t"][()][0])
+
+        # Snapshots written by src/generate_dns.py carry the primitives directly
+        # in a `prim` group: [ρ, v_x, v_y, p]. Prefer it — `hydro` there holds
+        # *relativistic* conserved variables (D = ρW, S_i = ρhW²v_i), for which
+        # the Newtonian inversion v = S/ρ below would be wrong.
+        if "prim" in f:
+            prim = f["prim"]["data"][0, GHOST:-GHOST, GHOST:-GHOST, :]  # (Ny, Nx, 4)
+            return {
+                "rho": prim[..., 0],
+                "vx": prim[..., 1],
+                "vy": prim[..., 2],
+                "p": prim[..., 3],
+                "t": t,
+            }
+
         hydro = f["hydro"]["data"][0, GHOST:-GHOST, GHOST:-GHOST, :]  # (Ny, Nx, 5)
         thd = f["thd"]["data"][0, GHOST:-GHOST, GHOST:-GHOST, :]      # (Ny, Nx, 2)
-        t = float(f["Parameters"]["t"][()][0])
 
     rho = hydro[..., 0]
     sx = hydro[..., 2]
     sy = hydro[..., 3]
-    
+
     p = thd[..., 0]
 
     vx = sx / rho
     vy = sy / rho
 
-    # A few Aenus dumps (t=10.0 and t=13.0 in test1) contain a handful of superluminal
-    # cells. Left alone they make W = 1/sqrt(1-v²) blow up and compute_sgs_stress returns
-    # |τ| ~ 1e12 instead of ~1e-4, which silently poisons training targets and any
-    # time-interpolated exact closure that spans the snapshot.
-    v_sq = vx**2 + vy**2
-    unphysical = v_sq >= 1.0
-    n_bad = int(unphysical.sum())
-    if n_bad:
-        warnings.warn(
-            f"{Path(filepath).name} (t={t}): {n_bad} superluminal cell(s), max v² = "
-            f"{v_sq.max():.6f}; rescaling those cells to v² = {V_MAX_SQ}.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        scale = np.where(unphysical, np.sqrt(V_MAX_SQ / np.maximum(v_sq, 1e-30)), 1.0)
-        vx = vx * scale
-        vy = vy * scale
+    # NOTE: an earlier version rescaled cells with v² >= 1 here, on the theory that
+    # the t=10.0 and t=13.0 dumps were corrupt. They are not: this data is Newtonian
+    # (Γ = 5/3, verified to machine precision -- see `python -m src.config verify`),
+    # and v > 1 is unremarkable in a Newtonian flow. The guard was damaging valid
+    # data, so it has been removed. What made W = 1/sqrt(1-v²) blow up was reading
+    # Newtonian velocities as relativistic ones, which is a provenance error, not a
+    # data defect; `src.config.resolve_gamma` now catches that class of mistake.
 
     return {"rho": rho, "vx": vx, "vy": vy, "p": p, "t": t}
 
@@ -468,7 +478,11 @@ class SGSDataset(Dataset):
         # Compute normalization statistics
         self.field_mean = self.coarse_fields.mean(dim=0)
         self.field_std = self.coarse_fields.std(dim=0).clamp(min=1e-12)
-        self.tau_scale = self.tau_sgs.abs().mean()
+        # Mean Frobenius norm, matching TBNNDataset.tau_scale. These two used
+        # to disagree (abs().mean() here, a ~7x smaller number) while neither
+        # was used for anything; the τ scale now sets the L_tensor denominator
+        # floor, so a single definition matters.
+        self.tau_scale = self.tau_sgs.norm(dim=(-2, -1)).mean()
 
     def __len__(self) -> int:
         return self.coarse_fields.shape[0]

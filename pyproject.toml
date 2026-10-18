@@ -7,9 +7,12 @@ requires-python = ">=3.10"
 dependencies = [
     "h5py>=3.16.0",
     "matplotlib>=3.10.9",
+    "numba>=0.67.0",
     "torch>=2.14.0",
     "torchvision>=0.29.0",
     "tqdm>=4.70.0",
+    # src/config.py reads TOML; tomllib is stdlib only from 3.11.
+    "tomli>=2.0 ; python_version < '3.11'",
 ]
 
 [tool.uv.sources]

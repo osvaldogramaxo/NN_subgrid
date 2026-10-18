@@ -102,40 +102,52 @@ class TestEarlyStopping(unittest.TestCase):
         import torch
         from src.train_apriori import train
 
-        # Mock dataset instance
-        mock_ds = mock_dataset_cls.return_value
-        mock_ds.__len__.return_value = 16
-        mock_ds.invariants = torch.zeros(16, 15, dtype=torch.float64)
-        mock_ds.thermo = torch.zeros(16, 2, dtype=torch.float64)
-        mock_ds.basis = torch.zeros(16, 12, 4, 4, dtype=torch.float64)
-        mock_ds.tau_sgs = torch.zeros(16, 4, 4, dtype=torch.float64)
-        mock_ds.u_con = torch.zeros(16, 4, dtype=torch.float64)
-        mock_ds.grad_u_cov = torch.zeros(16, 4, 4, dtype=torch.float64)
-        mock_ds.rho = torch.ones(16, dtype=torch.float64)
-        mock_ds.p = torch.ones(16, dtype=torch.float64)
-        mock_ds.inv_mean = torch.zeros(15, dtype=torch.float64)
-        mock_ds.inv_std = torch.ones(15, dtype=torch.float64)
-        mock_ds.thermo_mean = torch.zeros(2, dtype=torch.float64)
-        mock_ds.thermo_std = torch.ones(2, dtype=torch.float64)
-        mock_ds.tau_scale = torch.tensor(1.0, dtype=torch.float64)
-        mock_ds.snapshot_boundaries = [(0, 4, 4)]
+        from src.train_apriori import SnapshotView
 
-        # Mock dataloader iteration
-        mock_ds.__getitem__.return_value = (
-            torch.zeros(15, dtype=torch.float64),
-            torch.zeros(2, dtype=torch.float64),
-            torch.zeros(12, 4, 4, dtype=torch.float64),
-            torch.zeros(4, 4, dtype=torch.float64),
-            torch.zeros(4, dtype=torch.float64),
-            torch.zeros(4, 4, dtype=torch.float64),
-            torch.zeros((), dtype=torch.float64),
-            torch.zeros((), dtype=torch.float64),
-        )
+        # Stand-in dataset: 4 snapshots on a 2x2 coarse grid. A real object
+        # rather than a MagicMock, because train() now splits it by snapshot
+        # and builds views over it.
+        class _Stub:
+            def __init__(self):
+                n = 16
+                self.invariants = torch.zeros(n, 15, dtype=torch.float64)
+                self.thermo = torch.zeros(n, 2, dtype=torch.float64)
+                self.basis = torch.zeros(n, 12, 4, 4, dtype=torch.float64)
+                self.tau_sgs = torch.zeros(n, 4, 4, dtype=torch.float64)
+                self.u_con = torch.zeros(n, 4, dtype=torch.float64)
+                self.u_con[:, 0] = 1.0
+                self.grad_u_cov = torch.zeros(n, 4, 4, dtype=torch.float64)
+                self.rho = torch.ones(n, dtype=torch.float64)
+                self.p = torch.ones(n, dtype=torch.float64)
+                self.inv_mean = torch.zeros(15, dtype=torch.float64)
+                self.inv_std = torch.ones(15, dtype=torch.float64)
+                self.thermo_mean = torch.zeros(2, dtype=torch.float64)
+                self.thermo_std = torch.ones(2, dtype=torch.float64)
+                self.tau_scale = torch.tensor(1.0, dtype=torch.float64)
+                self.p_scale = torch.tensor(1.0, dtype=torch.float64)
+                self.snapshot_boundaries = [(i * 4, 2, 2) for i in range(4)]
+                self.times = [1.0, 2.0, 3.0, 4.0]
 
-        mock_train_epoch.return_value = {"train_loss": 0.5, "L_tensor": 0.5}
+            def __len__(self):
+                return self.invariants.shape[0]
+
+            @property
+            def num_snapshots(self):
+                return len(self.snapshot_boundaries)
+
+            def snapshot_view(self, indices):
+                return SnapshotView(self, indices)
+
+        mock_dataset_cls.return_value = _Stub()
+
+        mock_train_epoch.return_value = {
+            "train_loss": 0.5, "L_tensor": 0.5, "grad_norm": 0.1, "steps": 2.0,
+        }
 
         # Validation sequence: epoch 1 improves (1.0), epoch 2 (1.1) no improvement,
-        # epoch 3 (1.2) no improvement -> with lr_patience=1, patience=2x1=2, stops at epoch 3!
+        # epoch 3 (1.2) no improvement -> with lr_patience=1, patience=2x1=2, stops at epoch 3.
+        # The monitored metric is EMA-smoothed, but this sequence is monotone
+        # increasing so smoothing preserves the decision.
         mock_validate.side_effect = [
             {"val_loss": 1.0, "mse": 1.0, "rel_l2": 0.1},
             {"val_loss": 1.1, "mse": 1.1, "rel_l2": 0.11},
@@ -147,9 +159,14 @@ class TestEarlyStopping(unittest.TestCase):
             model, history = train(
                 data_dir=tmpdir,
                 epochs=10,
-                batch_size=4,
+                time_range=(1.0, 4.0),
+                test_time=None,
+                val_every=2,
+                snapshots_per_batch=2,
+                lr_schedule="plateau",
                 lr_patience=1,  # early stopping patience will default to 2 * 1 = 2
                 patience=None,
+                gamma_eos=4.0 / 3.0,
                 checkpoint_dir=tmpdir,
                 device_str="cpu",
                 dtype_str="float64",

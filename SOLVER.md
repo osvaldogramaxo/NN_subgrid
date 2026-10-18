@@ -144,6 +144,9 @@ scales your numerics, not your closure, set the dissipation.
 
 ## 3. Commands
 
+> Closure-specific references: [APRIORI_TRAINING.md](APRIORI_TRAINING.md) for the TBNN,
+> [MINIT.md](MINIT.md) for the MInIT competitor and its calibration.
+
 ### 3.1 A-posteriori rollout — `src.evaluate_rollout`
 
 Runs coarse-grid solvers and compares them against filtered DNS.
@@ -169,6 +172,9 @@ python -m src.evaluate_rollout \
 | `--sgs-coupling` | `flux` | `flux` (conservative, preferred) or `source` (legacy) |
 | `--skip-exact` | off | Skip the exact-DNS oracle run |
 | `--with-unclosed` | off | **Also run a no-SGS control.** Strongly recommended |
+| `--with-minit` | none | Add MInIT-closed runs: `fitted`, `paper`, `equilibrium`, `both`, `all`. See [MINIT.md](MINIT.md) |
+| `--minit-coefficients` | `results/minit/minit_coefficients.json` | Refit written by `src.minit_calibrate` |
+| `--minit-seed` | `dns` | `dns` or `uniform`. $e_\text{KH}=0$ is a fixed point, so an unseeded MInIT is inert |
 | `--backscatter-clip` | none | `zero` or `project` — see below. Requires `--sgs-coupling flux` |
 | `--save-history` | off | Write `rollout_trajectory.pt` (can be GB-scale) |
 | `--make-anim` | off | Write `rollout_comparison.gif` |
@@ -254,7 +260,49 @@ A-priori relative L2 **is** reported during training, and that is correct: it co
 $\tau_\text{pred}$ against $\tau_\text{exact}$ at the same instant, which is a sound
 regression metric. Only the a-posteriori trajectory ranking was removed.
 
-### 3.3 Divergence diagnostics — `scratch/diagnose_divergence.py`
+### 3.3 DNS generation — `src.generate_dns`
+
+Generates relativistic KHI reference data. Writes HDF5 readable by
+`src.dataset.read_snapshot` with no special-casing: a `prim` group holds
+[ρ, v_x, v_y, p] directly, `hydro` holds the SRHD conserved state
+(D, E, S_x, S_y, S_z), and `Metadata` records Γ, the variable layout and the
+git commit.
+
+```bash
+python -u -m src.generate_dns --ic-only                # tune the IC, instant
+python -u -m src.generate_dns --output-dir dns_s0 --seed 0 --device cuda
+```
+
+The seed is broadband (`--seed-kmin/--seed-kmax`, default k ∈ [4,32]) and
+solenoidal, derived from a streamfunction. A single-mode seed — the Lecoanet
+KHI benchmark that `test1/` uses — produces one vortex pair per layer and no
+cascade; it is a convergence test, not a turbulence generator.
+
+Γ = 4/3 caps c_s at 1/√3, so high Lorentz factor forces high Mach and KHI
+growth slows. `--ic-only` prints the trade-off and warns past relative Mach 3.
+
+### 3.4 Configuration and EOS provenance — `src.config`
+
+`crmhd.toml` supplies defaults to every entry point. Precedence:
+
+    --gamma override  >  dataset Metadata  >  config file  >  built-in default
+
+A config that contradicts a dataset's recorded Γ is a **hard error**. Data with
+no metadata (`test1/`) falls back to the config and warns that nothing has been
+verified. Unknown keys and sections raise rather than being ignored.
+
+```bash
+python -m src.config show --data-dir dns_s0   # what will actually be used
+python -m src.config verify test1             # which EOS does this data satisfy?
+```
+
+`verify` tests the stored fields against both the Newtonian and SRHD closure
+relations and reports residuals for each. It is how `test1/` was identified as
+Newtonian Γ=5/3. Note that when a dataset stores no primitives, the SRHD energy
+check is *circular* — C2P solves that same relation — so the verdict rests on
+the sound speed, which is independent data.
+
+### 3.5 Divergence diagnostics — `scratch/diagnose_divergence.py`
 
 For when a rollout blows up. Records per-step scalars for the whole run and keeps a rolling
 buffer of full states so the approach to failure can be replayed.
@@ -268,7 +316,7 @@ Key arguments: `--sensor`, `--clip-kappa`, `--cfl`, `--reconstruction`,
 interval), `--out`. On failure it names the offending cells, their state on the previous
 step, and local minima of $\rho$ and $p$, then dumps everything to a `.pt`.
 
-### 3.4 Shell wrappers and HTCondor
+### 3.6 Shell wrappers and HTCondor
 
 Both wrappers take **positional** arguments; extra flags pass through after the fixed ones.
 
@@ -322,7 +370,38 @@ backscatter clipping.
 
 ---
 
-## 6. Known limitations
+## 6. Performance
+
+The hot path is lazily `torch.compile`d on CUDA. Measured on a V100 at 1024²
+float64:
+
+| | eager | compiled | |
+|---|---|---|---|
+| full step | 232.6 ms | 25.1 ms | **9.3x** |
+| `compute_rhs` (x3/step) | 211 ms | 17.6 ms | 12x |
+| `conserved_to_primitives` (x3/step) | 23 ms | 5.7 ms | 4x |
+
+Output is bit-identical to the eager path over 20 steps. A t=3 run at 1024²
+drops from ~70 min to ~6 min.
+
+Why it pays: eagerly, `compute_rhs` is many hundreds of small elementwise
+kernels — MP5's minmod/median logic over four variables, two directions and two
+interface states — each a separate round trip to memory. Inductor fuses those
+chains. `conserved_to_primitives` gains from the same fusion plus checking
+Newton convergence every 4th iteration rather than every one; each check is a
+GPU→host sync, and Newton needs only ~5 iterations.
+
+Tracing costs ~17 s per distinct call signature, once per process. Set
+`[solver] compile = false` (or `set_compile(False)`) for very short runs. It is
+skipped automatically on CPU. `set_gamma_eos` discards compiled graphs, since Γ
+is baked into them as a constant.
+
+`mode="max-autotune"` did not finish tracing in a reasonable time and
+`mode="reduce-overhead"` (CUDA graphs) fails on output-tensor reuse; the default
+mode is the right choice. float32 buys a further 1.5x but the C2P Newton
+tolerance of 1e-12 is unreachable in single precision.
+
+## 7. Known limitations
 
 | Limitation | Impact |
 |---|---|

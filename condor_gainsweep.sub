@@ -1,0 +1,11 @@
+universe       = vanilla
+executable     = ./run_gainsweep.sh
+arguments      = "$(gain)"
+output         = ./condor_logs/gain_$(Cluster)_$(gain).out
+error          = ./condor_logs/gain_$(Cluster)_$(gain).err
+log            = ./condor_logs/gain_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+queue gain in (1.0, 1.5, 2.0, 3.0, 5.0)

@@ -6,10 +6,24 @@
 universe       = vanilla
 executable     = ./run_train.sh
 
-# Arguments: <data_dir> <coarsening_factor> <stride> <epochs> <batch_size> <lr> <device> <plot_interval> [patience] [extra_flags...]
-# To resume training from checkpoints/ (picks up latest_model.pt or best_model.pt), append --resume to extra_flags.
-# Example: arguments = "test1 4 5 2500 2048 1e-3 cuda 10 --loss-alpha 100.0 --loss-beta 0.1 --loss-gamma 5.0 --loss-delta 2.0 --resume"
-arguments      = "test1 4 5 2500 2048 1e-5 cuda 10 --loss-alpha 100.0 --loss-beta 1 --loss-gamma 5.0 --loss-delta 10 --resume --reset-lr "
+# Arguments: <data_dir> <coarsening_factor> <stride> <epochs> <snapshots_per_batch> <lr> <device> <plot_interval> [patience] [extra_flags...]
+#
+# NOTE argument 5 changed meaning: it is --snapshots-per-batch (whole snapshots
+# per optimizer step), not --batch-size in points. Batches are snapshots now,
+# which is what lets L_spectral share a backward pass with the point-wise
+# terms instead of taking its own optimizer step at the end of each epoch.
+#
+# Argument 3 (stride) is 1: dns_khi has only 81 snapshots over t = 0..8, and
+# the default window t in [1, 6.5] leaves ~44 for training after the
+# interleaved validation holdout.
+#
+# --loss-gamma is omitted deliberately: it defaults to 0 because L_ortho is
+# identically zero for a basis-contracted output (u_mu E^{mu nu} = 0 to 3e-16).
+# The earlier "--loss-gamma 5.0" weighted a term that could only return 0.
+#
+# To resume training from checkpoints/ (picks up latest_model.pt or
+# best_model.pt), append --resume to extra_flags.
+arguments      = "dns_khi_s1 16 1 2500 2 1e-3 cuda 10"
 
 # Output log files
 output         = ./condor_logs/train_$(Cluster)_$(Process).out
@@ -25,6 +39,6 @@ request_memory = 32768
 request_gpus   = 1
 
 # Optional cluster constraints (e.g. for Artemisa nodes)
-+UseNvidiaA100 = True
+# +UseNvidiaA100 = True
 
 queue 1

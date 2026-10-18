@@ -40,7 +40,10 @@ from src.dataset import (
     read_snapshot, relativistic_favre_filter, GAMMA_EOS, compute_sgs_stress,
     compute_sgs_stress_on_faces,
 )
+from src.config import add_config_arguments, apply_config_defaults, configure
 from src.features import extract_tbnn_features
+from src.minit import MInITClosure, MInITCoefficients, subgrid_energy_from_stress
+from src.minit_learned import HybridClosure, LearnedMInITClosure
 from src.solver import RHDSolver, compute_transition_sensor, clip_sgs_tensor, clip_backscatter, smooth_sgs_tensor
 
 
@@ -137,19 +140,200 @@ def spectral_metrics(
     return out
 
 
+def windowed_band_ratios(
+    history_ref: dict,
+    runs: dict[str, dict],
+    valid: np.ndarray,
+    windows: list[tuple[float, float]],
+    baseline: str | None = None,
+    t_tol: float = np.inf,
+    block_time: float = 0.5,
+    n_boot: int = 1000,
+) -> dict[str, dict[str, dict[str, float]]]:
+    r"""Band ratios averaged over time windows, instead of read off one frame.
+
+    A single-frame band ratio is noise on a chaotic rollout: on ``dns_khi`` at r=16 the
+    high band swings 0.08-0.34 frame to frame, and three conclusions drawn from final-time
+    values had to be withdrawn (FEASIBILITY §16-17).
+
+    * **Per-frame geometric mean**, not a ratio of time averages. A ratio of averages
+      weights each frame by the DNS's own band energy, which roughly doubles over a KHI
+      run. The geometric mean weights frames equally and is scale-free.
+    * **Separate windows per regime.** Retention itself falls over a run (high band
+      ~0.44 -> ~0.30 on dns_khi) and closures tie early but separate late, so one long
+      average mixes regimes. Quote per-window numbers.
+    * **Reference = nearest real DNS snapshot**, never a blend of two (``history_ref``);
+      ``valid`` marks frames with a snapshot close enough. Run frames whose own time is
+      more than ``t_tol`` from the reference frame's are dropped, so a solver that skips
+      a save cannot silently shift its index alignment.
+    * **Paired comparison against ``baseline``** (normally the exact-stress oracle, the
+      best any closure can do on this solver): ``vs_baseline_high`` =
+      exp(mean(log r_run - log r_base)), where the DNS reference cancels exactly. Raw
+      retention is *not* a quality score -- the no-model run and the TBNN retain more
+      high-k than the oracle -- closeness to the oracle is.
+    * **Circular moving-block bootstrap**, one set of resampled frames per window shared
+      by every run, ``ceil(n/L)`` blocks truncated to ``n`` frames, ``block_time`` 0.5
+      (the measured decorrelation time of the log ratios). The CI covers frame sampling
+      along this one trajectory only -- not initial-condition or training-seed spread.
+
+    Returns ``{window: {run: {band_ratio_low/mid/high, e_ratio_total,
+    log_spectral_distance, high_err, vs_baseline_high, vs_baseline_lo, vs_baseline_hi,
+    n_frames, partial}}}``.
+    """
+    t = np.asarray(history_ref["t"], dtype=np.float64)
+    keys = ("band_ratio_low", "band_ratio_mid", "band_ratio_high",
+            "e_ratio_total", "log_spectral_distance")
+    rng = np.random.default_rng(0)
+    out: dict[str, dict[str, dict[str, float]]] = {}
+
+    def usable(h):
+        n = min(len(h["rho"]), len(t))
+        ok = np.zeros(len(t), dtype=bool)
+        th = np.asarray(h["t"], dtype=np.float64)[:n] if "t" in h else t[:n]
+        ok[:n] = np.abs(th - t[:n]) <= t_tol
+        return ok
+
+    for lo, hi in windows:
+        win = valid & (t >= lo - 1e-9) & (t <= hi + 1e-9)
+        frames = np.where(win)[0]
+        wlabel = f"{lo:g}-{hi:g}"
+        out[wlabel] = {}
+        if len(frames) == 0:
+            continue
+        n = len(frames)
+        dt_frame = np.median(np.diff(t[frames])) if n > 1 else block_time
+        L = min(n, max(1, int(round(block_time / dt_frame))))
+        starts = rng.integers(0, n, size=(n_boot, -(-n // L)))
+        boot = ((starts[:, :, None] + np.arange(L)) % n).reshape(n_boot, -1)[:, :n]
+
+        logs = {}                                   # run -> (n, 4) log ratios, NaN off-frame
+        for label, h in runs.items():
+            ok = usable(h)[frames]
+            if not ok.any():
+                continue
+            per = np.full((n, len(keys)), np.nan)
+            for j, i in enumerate(frames):
+                if ok[j]:
+                    m = spectral_metrics(
+                        h["rho"][i], h["vx"][i], h["vy"][i],
+                        history_ref["rho"][i], history_ref["vx"][i], history_ref["vy"][i],
+                    )
+                    per[j] = [m[k] for k in keys]
+            lg = np.log(np.where(per[:, :4] > 0, per[:, :4], np.nan))
+            logs[label] = lg
+            row = {k: float(np.exp(np.nanmean(lg[:, c]))) for c, k in enumerate(keys[:4])}
+            row["log_spectral_distance"] = float(np.nanmean(per[:, 4]))
+            row["n_frames"] = int(np.isfinite(lg[:, 2]).sum())
+            row["partial"] = row["n_frames"] < n    # diverged / misaligned: not comparable
+            row["high_err"] = (float(np.exp(lg[boot, 2].mean(axis=1)).std())
+                               if L < n and not row["partial"] else float("nan"))
+            out[wlabel][label] = row
+
+        if baseline in logs:
+            base = logs[baseline][:, 2]
+            for label, lg in logs.items():
+                d = lg[:, 2] - base
+                if not np.isfinite(d).all():        # partial run or baseline: no CI
+                    out[wlabel][label].update(vs_baseline_high=float(np.exp(np.nanmean(d))),
+                                              vs_baseline_lo=float("nan"),
+                                              vs_baseline_hi=float("nan"))
+                    continue
+                b = np.exp(d[boot].mean(axis=1))
+                out[wlabel][label].update(
+                    vs_baseline_high=float(np.exp(d.mean())),
+                    vs_baseline_lo=float(np.percentile(b, 2.5)) if L < n else float("nan"),
+                    vs_baseline_hi=float(np.percentile(b, 97.5)) if L < n else float("nan"),
+                )
+    return out
+
+
 from collections.abc import Mapping
+
+# One style per MInIT variant, so a variant can never be dropped from a plot by
+# running past the end of a style list, and so colours stay stable across figures.
+_MINIT_STYLE = {
+    "fitted": {"color": "tab:cyan", "ls": "-"},
+    "paper": {"color": "tab:olive", "ls": "-."},
+    "equilibrium": {"color": "tab:pink", "ls": "-"},
+    "learned-residual": {"color": "tab:red", "ls": "-"},
+    "learned-direct": {"color": "tab:brown", "ls": "--"},
+    "hybrid": {"color": "tab:purple", "ls": "-"},
+}
+
+# Learned-coefficient runs share the MInIT run/history dicts, so that the
+# spectra, bar chart, density panels, animation and saved history pick them up
+# without a parallel set of plumbing that a later edit could forget to update.
+# They are a different model, though, so they must not be *labelled* MInIT.
+_LEARNED_PREFIX = "learned-"
+
+
+def _variant_label(variant: str) -> str:
+    """Display name for a run stored in the MInIT dicts."""
+    if variant == "hybrid":
+        return "hybrid (TBNN shape x MiNNit amp)"
+    if variant.startswith(_LEARNED_PREFIX):
+        return f"learned-coeff ({variant[len(_LEARNED_PREFIX):]})"
+    return f"MInIT ({variant})"
+
+
+def _variant_key(variant: str) -> str:
+    """Results-dict key for a run stored in the MInIT dicts."""
+    if variant == "hybrid":
+        return "hybrid"
+    if variant.startswith(_LEARNED_PREFIX):
+        return f"learned_{variant[len(_LEARNED_PREFIX):]}"
+    return f"minit_{variant}"
+
+
+def _collect_runs(
+    history_tbnn: Mapping[str, object] | None,
+    history_exact: Mapping[str, object] | None,
+    history_unclosed: Mapping[str, object] | None,
+    history_minit: Mapping[str, Mapping[str, object]] | None,
+) -> list[tuple[str, torch.Tensor]]:
+    """Gather every available run's density history, in a fixed display order.
+
+    Ordered control first, then the competing closures, then the oracle, so the
+    panels read left to right as "does anything change?". Built from whatever is
+    present rather than from a fixed layout, so adding a closure does not
+    silently drop it from the figures — which is what happened when MInIT was
+    first wired in.
+    """
+    candidates: list[tuple[str, Mapping[str, object] | None]] = [
+        ("Unclosed (no SGS)", history_unclosed),
+    ]
+    for variant, hist in sorted((history_minit or {}).items()):
+        candidates.append((_variant_label(variant), hist))
+    candidates += [
+        ("TBNN-Closed", history_tbnn),
+        ("Exact DNS-Closed", history_exact),
+    ]
+
+    runs: list[tuple[str, torch.Tensor]] = []
+    for label, hist in candidates:
+        if hist is None or "rho" not in hist:
+            continue
+        rho = hist["rho"]
+        if isinstance(rho, torch.Tensor) and rho.numel():
+            runs.append((label, rho))
+    return runs
+
 
 def create_rollout_animation(
     history_dns: Mapping[str, object],
     history_tbnn: Mapping[str, object] | None = None,
     history_exact: Mapping[str, object] | None = None,
     history_unclosed: Mapping[str, object] | None = None,
+    history_minit: Mapping[str, Mapping[str, object]] | None = None,
     output_path: str = "results/rollout_comparison.gif",
     fps: int = 10,
 ) -> str:
-    """Synchronised panel animation comparing DNS against each available solver.
+    """Synchronised panel animation comparing DNS against every available solver.
 
-    Layout is 2x2, or 2x3 when an unclosed control run is supplied.
+    The layout is built from the runs that are actually present: the top row
+    shows the filtered DNS and each solver's density, the bottom row the
+    corresponding ``|run - DNS|`` error map under each one. A fixed grid would
+    quietly omit any closure it was not written for.
     """
     times = np.asarray(history_dns["t"])
     N_frames = len(times)
@@ -160,130 +344,89 @@ def create_rollout_animation(
     rho_dns_all = history_dns["rho"]
     assert isinstance(rho_dns_all, torch.Tensor)
 
-    rho_tbnn_all: torch.Tensor | None = None
-    if history_tbnn is not None and "rho" in history_tbnn:
-        tbnn_val = history_tbnn["rho"]
-        assert isinstance(tbnn_val, torch.Tensor)
-        rho_tbnn_all = tbnn_val
+    runs = _collect_runs(history_tbnn, history_exact, history_unclosed, history_minit)
+    if not runs:
+        print("[ANIM] No solver runs to compare against; skipping animation.")
+        return output_path
 
-    rho_exact_all: torch.Tensor | None = None
-    if history_exact is not None and "rho" in history_exact:
-        exact_val = history_exact["rho"]
-        assert isinstance(exact_val, torch.Tensor)
-        rho_exact_all = exact_val
-
-    rho_unclosed_all: torch.Tensor | None = None
-    if history_unclosed is not None and "rho" in history_unclosed:
-        unclosed_val = history_unclosed["rho"]
-        assert isinstance(unclosed_val, torch.Tensor)
-        rho_unclosed_all = unclosed_val
-
-    # Determine global vmin, vmax across all density models and timestamps
-    all_rho: list[torch.Tensor] = [rho_dns_all]
-    if rho_tbnn_all is not None:
-        all_rho.append(rho_tbnn_all)
-    if rho_exact_all is not None:
-        all_rho.append(rho_exact_all)
-    if rho_unclosed_all is not None:
-        all_rho.append(rho_unclosed_all)
-
+    # Shared density scale across every panel and frame, so panels are comparable.
+    all_rho = [rho_dns_all] + [r for _, r in runs]
     vmin = min(float(t.min()) for t in all_rho)
     vmax = max(float(t.max()) for t in all_rho)
 
-    n_cols = 3 if rho_unclosed_all is not None else 2
-    fig, axes = plt.subplots(2, n_cols, figsize=(6.5 * n_cols, 11))
-    fig.subplots_adjust(left=0.06, right=0.88, top=0.92, bottom=0.06, wspace=0.18, hspace=0.22)
-    ax_dns, ax_tbnn = axes[0, 0], axes[0, 1]
-    ax_exact, ax_err = axes[1, 0], axes[1, 1]
-    ax_unclosed = axes[0, 2] if n_cols == 3 else None
-    if n_cols == 3:
-        axes[1, 2].axis("off")
-
-    im_dns = ax_dns.imshow(
-        rho_dns_all[0].numpy(), origin="lower", cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal"
+    # One error scale as well, so the maps rank against each other rather than
+    # each being normalised to its own worst cell.
+    max_err = max(
+        float((r[:N_frames] - rho_dns_all[:N_frames]).abs().max()) for _, r in runs
     )
-    ax_dns.set_title("Filtered DNS Ground Truth", fontsize=11, fontweight="bold")
+    max_err = max(max_err, 1e-12)
 
-    im_tbnn = None
-    if rho_tbnn_all is not None:
-        im_tbnn = ax_tbnn.imshow(
-            rho_tbnn_all[0].numpy(), origin="lower", cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal"
+    n_cols = 1 + len(runs)
+    panel_w = 6.5 if n_cols <= 3 else max(3.2, 20.0 / n_cols)
+    fig, axes = plt.subplots(
+        2, n_cols, figsize=(panel_w * n_cols, 2.05 * panel_w), squeeze=False,
+    )
+    fig.subplots_adjust(
+        left=0.04, right=0.88, top=0.90, bottom=0.05, wspace=0.16, hspace=0.18,
+    )
+
+    im_dns = axes[0, 0].imshow(
+        rho_dns_all[0].numpy(), origin="lower", cmap="viridis",
+        vmin=vmin, vmax=vmax, aspect="equal",
+    )
+    axes[0, 0].set_title("Filtered DNS Ground Truth", fontsize=11, fontweight="bold")
+    axes[1, 0].axis("off")
+
+    ims_rho: list[tuple[torch.Tensor, object]] = []
+    ims_err: list[tuple[torch.Tensor, object]] = []
+    for col, (label, rho_all) in enumerate(runs, start=1):
+        im = axes[0, col].imshow(
+            rho_all[0].numpy(), origin="lower", cmap="viridis",
+            vmin=vmin, vmax=vmax, aspect="equal",
         )
-        ax_tbnn.set_title("TBNN-Closed Solver", fontsize=11, fontweight="bold")
-    else:
-        ax_tbnn.text(0.5, 0.5, "TBNN Disabled\n(No Checkpoint)", ha="center", va="center", transform=ax_tbnn.transAxes, fontsize=12, color="gray")
-        ax_tbnn.axis("off")
+        axes[0, col].set_title(label, fontsize=11, fontweight="bold")
+        ims_rho.append((rho_all, im))
 
-    im_exact = None
-    if rho_exact_all is not None:
-        im_exact = ax_exact.imshow(
-            rho_exact_all[0].numpy(), origin="lower", cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal"
+        im_e = axes[1, col].imshow(
+            (rho_all[0] - rho_dns_all[0]).abs().numpy(), origin="lower",
+            cmap="magma", vmin=0.0, vmax=max_err, aspect="equal",
         )
-        ax_exact.set_title("Exact DNS-Closed Solver", fontsize=11, fontweight="bold")
-    else:
-        ax_exact.text(0.5, 0.5, "Exact Solver Skipped", ha="center", va="center", transform=ax_exact.transAxes, fontsize=12, color="gray")
-        ax_exact.axis("off")
+        axes[1, col].set_title(f"|{label} - DNS|", fontsize=10)
+        ims_err.append((rho_all, im_e))
 
-    im_unclosed = None
-    if ax_unclosed is not None and rho_unclosed_all is not None:
-        im_unclosed = ax_unclosed.imshow(
-            rho_unclosed_all[0].numpy(), origin="lower", cmap="viridis", vmin=vmin, vmax=vmax, aspect="equal"
-        )
-        ax_unclosed.set_title("Unclosed (no SGS)", fontsize=11, fontweight="bold")
+    cbar_rho = fig.colorbar(im_dns, cax=fig.add_axes((0.90, 0.54, 0.015, 0.34)))
+    cbar_rho.set_label("Rest-frame Density ρ̄", fontsize=10)
+    if ims_err:
+        cbar_err = fig.colorbar(ims_err[0][1], cax=fig.add_axes((0.90, 0.10, 0.015, 0.34)))
+        cbar_err.set_label("|Δρ̄|", fontsize=10)
 
-    im_err = None
-    target_err_all = rho_tbnn_all if rho_tbnn_all is not None else rho_exact_all
-    err_title = "|TBNN - DNS| Absolute Error" if rho_tbnn_all is not None else "|Exact - DNS| Absolute Error"
-    if target_err_all is not None:
-        err0 = (target_err_all[0] - rho_dns_all[0]).abs().numpy()
-        max_err_val = max(0.5, float((target_err_all - rho_dns_all).abs().max()))
-        im_err = ax_err.imshow(
-            err0, origin="lower", cmap="magma", vmin=0.0, vmax=max_err_val, aspect="equal"
-        )
-        ax_err.set_title(err_title, fontsize=11, fontweight="bold")
-    else:
-        ax_err.text(0.5, 0.5, "No Model Available", ha="center", va="center", transform=ax_err.transAxes, fontsize=12, color="gray")
-        ax_err.axis("off")
-
-    # Shared colorbar for density
-    cbar_ax = fig.add_axes((0.90, 0.15, 0.02, 0.70))
-    cbar = fig.colorbar(im_dns, cax=cbar_ax)
-    cbar.set_label("Rest-frame Density ρ̄", fontsize=11)
-
-    pbar_anim = tqdm(total=N_frames, desc="Rendering animation frames", unit="frame", dynamic_ncols=True, file=sys.stdout)
+    pbar_anim = tqdm(
+        total=N_frames, desc="Rendering animation frames", unit="frame",
+        dynamic_ncols=True, file=sys.stdout,
+    )
 
     def update(frame_idx: int):
         t_val = float(times[frame_idx])
-        fig.suptitle(f"Relativistic Hydrodynamics Rollout Comparison  (t = {t_val:.2f})", fontsize=14, fontweight="bold")
+        fig.suptitle(
+            f"Relativistic Hydrodynamics Rollout Comparison  (t = {t_val:.2f})",
+            fontsize=14, fontweight="bold",
+        )
 
         rho_dns_k = rho_dns_all[frame_idx]
         im_dns.set_data(rho_dns_k.numpy())
 
-        if im_tbnn is not None and rho_tbnn_all is not None:
-            rho_tbnn_k = rho_tbnn_all[frame_idx]
-
-            im_tbnn.set_data(rho_tbnn_k.numpy())
-
-
-        if im_exact is not None and rho_exact_all is not None:
-            rho_exact_k = rho_exact_all[frame_idx]
-
-            im_exact.set_data(rho_exact_k.numpy())
-
-
-        if im_unclosed is not None and rho_unclosed_all is not None:
-            im_unclosed.set_data(rho_unclosed_all[frame_idx].numpy())
-
-        if im_err is not None and target_err_all is not None:
-            err_map_k = (target_err_all[frame_idx] - rho_dns_k).abs().numpy()
-            im_err.set_data(err_map_k)
+        for rho_all, im in ims_rho:
+            im.set_data(rho_all[frame_idx].numpy())
+        for rho_all, im_e in ims_err:
+            im_e.set_data((rho_all[frame_idx] - rho_dns_k).abs().numpy())
 
         pbar_anim.update(1)
         return [im_dns]
 
-    ani = anim.FuncAnimation(fig, update, frames=N_frames, interval=int(1000 / fps), blit=False)
-    writer = anim.PillowWriter(fps=fps)
-    ani.save(output_path, writer=writer)
+    ani = anim.FuncAnimation(
+        fig, update, frames=N_frames, interval=int(1000 / fps), blit=False,
+    )
+    ani.save(output_path, writer=anim.PillowWriter(fps=fps))
     pbar_anim.close()
     plt.close(fig)
     print(f"\n[ANIM] Animation successfully saved to {output_path}")
@@ -837,6 +980,18 @@ def evaluate_rollout(
     tau_smooth_passes: int = 0,
     face_closure: bool = False,
     with_unclosed: bool = False,
+    minit_variants: tuple[str, ...] = (),
+    minit_coefficients: str | None = None,
+    minit_seed: str = "dns",
+    minit_e_seed: float = 0.0,
+    minit_floor_fraction: float = 0.0,
+    minit_advect: bool = False,
+    minit_shear_mode: str = "dvxdy",
+    learned_coeff: tuple[str, ...] = (),
+    learned_gain: float = 1.0,
+    hybrid_coeff: str | None = None,
+    band_windows: list[tuple[float, float]] | None = None,
+    band_skip: float = 0.5,
     save_history: bool = False,
     make_anim: bool = False,
     anim_interval: float = 0.1,
@@ -867,6 +1022,28 @@ def evaluate_rollout(
         filter boxes) so its divergence is compact, instead of interpolating a
         cell-centred stress. Exact-DNS closure only.
     with_unclosed : bool — also run a solver with no SGS term, as a control
+    minit_variants : any of "fitted", "paper", "equilibrium" — MInIT runs to add.
+        "fitted" uses coefficients refit on this DNS by ``src.minit_calibrate``;
+        "paper" transfers the published 3D Newtonian MHD calibration verbatim,
+        and the gap between the two separates the model from its calibration;
+        "equilibrium" replaces the turbulent-energy ODE with its fixed point,
+        which is what the free calibration converges towards and which scores
+        best a-priori.
+    minit_coefficients : path to the refit written by ``src.minit_calibrate``
+    minit_seed : "dns" (seed e_KH from the exact filtered-DNS subgrid energy at
+        t_start, mirroring the paper and giving MInIT the same single snapshot of
+        ground truth the exact-DNS oracle gets), or "uniform" (seed from
+        ``minit_e_seed``, fully self-contained). These are different experiments.
+    minit_e_seed : uniform seed value used when minit_seed == "uniform"
+    minit_floor_fraction : hold e_KH at this fraction of its local saturation
+        value, so a decayed region can restart
+    minit_advect : include the advective term the paper drops
+    minit_shear_mode : "dvxdy" (Eq. 23 literally) or "strain" (invariant)
+    learned_coeff : paths to checkpoints from ``src.train_minit_coeff`` — MInIT
+        with a state-dependent coefficient (``src.minit_learned``). These runs
+        are stateless and take **no seed**: unlike the ``minit_variants`` rows,
+        which are handed the exact filtered-DNS e_KH at t_start, they read only
+        resolved state. Read any comparison between them with that in mind.
     save_history : bool — save full trajectory arrays to rollout_trajectory.pt
     make_anim : bool — generate animated comparison GIF
     anim_interval : float — simulation time interval between frames
@@ -1099,6 +1276,166 @@ def evaluate_rollout(
         if save_int is not None:
             history_unclosed = solver_unclosed.get_history()
 
+    # --- Solver 4: MInIT-closed (competing algebraic closure) ---
+    # MInIT carries its own evolved turbulent energy density, so unlike the TBNN
+    # and exact-DNS closures it is stateful; RHDSolver.evolve advances it once
+    # per completed step via the closure's advance() hook.
+    prims_minit: dict[str, dict] = {}
+    history_minit: dict[str, dict] = {}
+    minit_closures: dict[str, MInITClosure] = {}
+
+    if minit_variants:
+        # "equilibrium" drops the ODE for its fixed point; see MInITClosure.
+        coeff_sets: dict[str, tuple[MInITCoefficients, str]] = {}
+        for variant in minit_variants:
+            if variant == "paper":
+                coeff_sets["paper"] = (MInITCoefficients.paper(), "evolve")
+                continue
+
+            mode = "equilibrium" if variant == "equilibrium" else "evolve"
+            path = minit_coefficients
+            if variant == "equilibrium" and path:
+                eq_path = Path(path).with_name(Path(path).stem + "_equilibrium.json")
+                path = str(eq_path)
+            if not path or not os.path.exists(path):
+                raise FileNotFoundError(
+                    f"MInIT variant {variant!r} needs refit coefficients, but "
+                    f"{path!r} does not exist. Run `python -m src.minit_calibrate` "
+                    f"first, or ask for --with-minit paper."
+                )
+            coeff_sets[variant] = (MInITCoefficients.load(path), mode)
+
+        # e_KH = 0 is a fixed point of the model, so without a seed MInIT is
+        # inert and the run would silently reproduce the unclosed control.
+        e_seed_field = None
+        if minit_seed == "dns":
+            _, tau0 = compute_sgs_stress(rho0, vx0, vy0, p0, r=r, project_to_fluid_frame=True)
+            e_seed_field = subgrid_energy_from_stress(tau0).to(device)
+            print(f"\nMInIT seed: exact filtered-DNS e_KH at t={snap0['t']:.2f} "
+                  f"(mean {float(e_seed_field.mean()):.3e}, max {float(e_seed_field.max()):.3e})")
+        elif minit_seed == "uniform":
+            print(f"\nMInIT seed: uniform e_KH = {minit_e_seed:.3e} (no DNS information)")
+        else:
+            raise ValueError(f"unknown MInIT seed mode {minit_seed!r}")
+
+        for variant, (coeffs, mode) in coeff_sets.items():
+            key = f"minit_{variant}"
+            print(f"\n--- Running MInIT-closed coarse solver [{variant}, {mode}] ---")
+            print(f"  beta_xx={coeffs.beta_xx:.4f} beta_yy={coeffs.beta_yy:.4f} "
+                  f"beta_xy={coeffs.beta_xy:.4f} A_gamma={coeffs.A_gamma:.4f} C={coeffs.C:.4f}")
+
+            solver_minit = RHDSolver(
+                Nc_y, Nc_x, cfl=cfl, reconstruction=reconstruction,
+                riemann_solver=riemann_solver, dtype=dtype, device=device,
+            )
+            solver_minit.initialize(
+                coarse0["rho_bar"].to(device),
+                coarse0["vx_tilde"].to(device),
+                coarse0["vy_tilde"].to(device),
+                coarse0["p_bar"].to(device),
+            )
+            solver_minit.t = snap0["t"]
+
+            # delta_f is the filter scale, which for a coarse cell that *is* the
+            # filter box equals the coarse spacing.
+            closure = MInITClosure(
+                dx=dx, dy=dy, delta_f=dx, coeffs=coeffs,
+                shear_mode=minit_shear_mode,
+                mode=mode,
+                advect=minit_advect,
+                e_seed=minit_e_seed,
+                floor_fraction=minit_floor_fraction,
+                backscatter_clip=backscatter_clip,
+                backscatter_fraction=backscatter_fraction,
+                tau_smooth_passes=tau_smooth_passes,
+            )
+            closure.initialize(solver_minit.prims, e_KH=e_seed_field)
+
+            ok_minit = _safe_evolve(
+                solver_minit, key,
+                sgs_closure=closure,
+                verbose=True,
+                progress_bar=True,
+                desc=f"MInIT-Closed ({variant})",
+                save_interval=save_int,
+            )
+
+            if ok_minit:
+                prims_minit[variant] = solver_minit.get_primitives()
+            minit_closures[variant] = closure
+            if save_int is not None:
+                history_minit[variant] = solver_minit.get_history()
+
+    learned_jobs = [(p_, False) for p_ in learned_coeff]
+    if hybrid_coeff:
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError("--with-hybrid needs the TBNN --checkpoint for its shape")
+        learned_jobs.append((hybrid_coeff, True))
+
+    for ckpt_path, is_hybrid in learned_jobs:
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(
+                f"learned coefficients {ckpt_path!r} does not exist. Run "
+                f"`python -m src.train_minit_coeff` first."
+            )
+        name = Path(ckpt_path).stem.replace("minit_coeff_", "")
+        if learned_gain != 1.0:
+            name = f"{name}-g{learned_gain:g}"
+        variant = "hybrid" if is_hybrid else f"{_LEARNED_PREFIX}{name}"
+        key = _variant_key(variant)
+        print(f"\n--- Running {_variant_label(variant)} [{name}] ---")
+
+        closure = LearnedMInITClosure.load(
+            ckpt_path, dx, dy, device=device,
+            backscatter_clip=backscatter_clip,
+            backscatter_fraction=backscatter_fraction,
+            tau_smooth_passes=tau_smooth_passes,
+        )
+        closure.cfg.gain = learned_gain
+        print(f"  mode={closure.cfg.output_mode} gain={learned_gain:g} "
+              f"beta_xx={closure.cfg.beta_xx:.4f} beta_yy={closure.cfg.beta_yy:.4f} "
+              f"beta_xy={closure.cfg.beta_xy:.4f} "
+              f"params={sum(p_.numel() for p_ in closure.net.parameters())}")
+
+        diag_closure = closure          # carries e_KH for the diagnostics below
+        if is_hybrid:
+            # Same TBNN closure as the TBNN row; its energy is replaced by MiNNit's.
+            closure = HybridClosure(TBNNSGSClosure(
+                model,
+                ckpt["inv_mean"].to(device), ckpt["inv_std"].to(device),
+                ckpt["thermo_mean"].to(device), ckpt["thermo_std"].to(device),
+                dx, dy,
+                backscatter_clip=backscatter_clip,
+                backscatter_fraction=backscatter_fraction,
+                tau_smooth_passes=tau_smooth_passes,
+            ), closure)
+
+        solver_l = RHDSolver(
+            Nc_y, Nc_x, cfl=cfl, reconstruction=reconstruction,
+            riemann_solver=riemann_solver, dtype=dtype, device=device,
+        )
+        solver_l.initialize(
+            coarse0["rho_bar"].to(device),
+            coarse0["vx_tilde"].to(device),
+            coarse0["vy_tilde"].to(device),
+            coarse0["p_bar"].to(device),
+        )
+        solver_l.t = snap0["t"]
+
+        ok_l = _safe_evolve(
+            solver_l, key,
+            sgs_closure=closure,
+            verbose=True,
+            progress_bar=True,
+            desc=_variant_label(variant),
+            save_interval=save_int,
+        )
+        if ok_l:
+            prims_minit[variant] = solver_l.get_primitives()
+        minit_closures[variant] = diag_closure
+        if save_int is not None:
+            history_minit[variant] = solver_l.get_history()
+
     # --- Ground truth: filtered DNS at t_end ---
     snap_final = min(snapshots, key=lambda s: abs(s["t"] - t_end))
     rho_f = torch.tensor(snap_final["rho"], dtype=dtype)
@@ -1136,9 +1473,25 @@ def evaluate_rollout(
         _report("unclosed (no SGS)", "unclosed",
                 (prims_unclosed["rho"].cpu(), prims_unclosed["vx"].cpu(), prims_unclosed["vy"].cpu()))
 
+    # Sorted, to match the order the density panels and bar chart use.
+    for variant in sorted(prims_minit):
+        pm = prims_minit[variant]
+        _report(_variant_label(variant), _variant_key(variant),
+                (pm["rho"].cpu(), pm["vx"].cpu(), pm["vy"].cpu()))
+
     if prims_exact is not None:
         _report("exact DNS-closed", "exact",
                 (prims_exact["rho"].cpu(), prims_exact["vx"].cpu(), prims_exact["vy"].cpu()))
+
+    # MInIT's own state is a diagnostic in its own right: an e_KH that collapsed
+    # or ran away explains a result that the field metrics only describe.
+    for variant in sorted(minit_closures):
+        closure = minit_closures[variant]
+        if closure.e_KH is not None:
+            results[f"{_variant_key(variant)}_e_kh_final_mean"] = float(closure.e_KH.mean())
+            results[f"{_variant_key(variant)}_e_kh_final_max"] = float(closure.e_KH.max())
+            print(f"  {_variant_label(variant)} final e_KH: mean "
+                  f"{float(closure.e_KH.mean()):.4e}, max {float(closure.e_KH.max()):.4e}")
 
     # --- Energy spectra ---
     k_dns, E_dns = kinetic_energy_spectrum(
@@ -1163,60 +1516,85 @@ def evaluate_rollout(
             prims_exact["rho"].cpu(), prims_exact["vx"].cpu(), prims_exact["vy"].cpu()
         )
 
-    # 2x3 layout:
-    # [0, 0] Ground Truth ρ | [0, 1] TBNN ρ | [0, 2] Exact DNS ρ
-    # [1, 0] Error Map |Δρ| | [1, 1] Energy Spectrum | [1, 2] Error Bar Chart
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    spectra_minit = {
+        variant: kinetic_energy_spectrum(
+            pm["rho"].cpu(), pm["vx"].cpu(), pm["vy"].cpu()
+        )
+        for variant, pm in prims_minit.items()
+    }
 
-    # Color scaling reference from ground truth
+    # The density panels are built from the runs that are present, so a newly
+    # added closure appears automatically instead of being dropped by a layout
+    # written before it existed. The diagnostic row underneath stays fixed:
+    # error map | spectrum | band-energy ratios.
+    panel_runs: list[tuple[str, torch.Tensor, str]] = []
+    if prims_unclosed is not None:
+        panel_runs.append(("Unclosed (no SGS)", prims_unclosed["rho"].cpu(), "unclosed"))
+    for variant in sorted(prims_minit):
+        panel_runs.append((
+            _variant_label(variant), prims_minit[variant]["rho"].cpu(),
+            _variant_key(variant),
+        ))
+    if prims_tbnn is not None:
+        panel_runs.append(("TBNN-Closed", prims_tbnn["rho"].cpu(), "tbnn"))
+    if prims_exact is not None:
+        panel_runs.append(("Exact DNS-Closed", prims_exact["rho"].cpu(), "exact"))
+
+    n_top = 1 + len(panel_runs)
+    panel_w = max(3.4, min(6.0, 26.0 / n_top))
+    title_fs = 11 if n_top <= 4 else 9
+    fig = plt.figure(figsize=(max(18.0, panel_w * n_top), 9.5))
+    # The density row needs a wider gutter than the diagnostic row: each panel
+    # carries its own colorbar, which a title will otherwise run into.
+    outer = fig.add_gridspec(2, 1, hspace=0.32, height_ratios=(1.0, 1.15))
+    gs_top = outer[0].subgridspec(1, n_top, wspace=0.55)
+    gs_bot = outer[1].subgridspec(1, 3, wspace=0.28)
+
     rho_dns_np = coarse_final["rho_bar"].numpy()
     vmin = float(np.min(rho_dns_np))
     vmax = float(np.max(rho_dns_np))
 
-    # [0, 0] Filtered DNS Ground Truth
-    im0 = axes[0, 0].imshow(rho_dns_np, origin="lower", cmap="viridis", aspect="equal", vmin=vmin, vmax=vmax)
-    axes[0, 0].set_title("Filtered DNS ρ (Ground Truth)", fontweight="bold")
-    plt.colorbar(im0, ax=axes[0, 0], shrink=0.8)
+    ax_dns = fig.add_subplot(gs_top[0])
+    im0 = ax_dns.imshow(rho_dns_np, origin="lower", cmap="viridis",
+                        aspect="equal", vmin=vmin, vmax=vmax)
+    ax_dns.set_title("Filtered DNS ρ\n(Ground Truth)", fontweight="bold", fontsize=title_fs)
+    plt.colorbar(im0, ax=ax_dns, shrink=0.75)
 
-    # [0, 1] TBNN-Closed Solver
-    if prims_tbnn is not None:
-        im1 = axes[0, 1].imshow(prims_tbnn["rho"].cpu().numpy(), origin="lower", cmap="viridis", aspect="equal", vmin=vmin, vmax=vmax)
-        hi_t = results.get("tbnn_band_ratio_high", float("nan"))
-        axes[0, 1].set_title(f"TBNN-Closed Solver ρ\nhigh-k E/E$_{{DNS}}$: {hi_t:.2f}", fontweight="bold")
-        plt.colorbar(im1, ax=axes[0, 1], shrink=0.8)
-    else:
-        axes[0, 1].text(0.5, 0.5, "TBNN Disabled\n(No Checkpoint)", ha="center", va="center", transform=axes[0, 1].transAxes)
-        axes[0, 1].axis("off")
+    for col, (label, rho_run, key) in enumerate(panel_runs, start=1):
+        ax = fig.add_subplot(gs_top[col])
+        im = ax.imshow(rho_run.numpy(), origin="lower", cmap="viridis",
+                       aspect="equal", vmin=vmin, vmax=vmax)
+        hi = results.get(f"{key}_band_ratio_high", float("nan"))
+        ax.set_title(f"{label}\nhigh-k E/E$_{{DNS}}$: {hi:.2f}",
+                     fontweight="bold", fontsize=title_fs)
+        plt.colorbar(im, ax=ax, shrink=0.75)
 
-    # [0, 2] Exact DNS-Closed Solver
-    if prims_exact is not None:
-        im2 = axes[0, 2].imshow(prims_exact["rho"].cpu().numpy(), origin="lower", cmap="viridis", aspect="equal", vmin=vmin, vmax=vmax)
-        hi_e = results.get("exact_band_ratio_high", float("nan"))
-        axes[0, 2].set_title(f"Exact DNS-Closed Solver ρ\nhigh-k E/E$_{{DNS}}$: {hi_e:.2f}", fontweight="bold")
-        plt.colorbar(im2, ax=axes[0, 2], shrink=0.8)
+    # [1, 0] Absolute error map for the last-listed run (the oracle when present,
+    # which is the one worth eyeballing against the others' metrics).
+    ax_err = fig.add_subplot(gs_bot[0])
+    if panel_runs:
+        err_label, err_rho, _ = panel_runs[-1]
+        diff_np = (err_rho - coarse_final["rho_bar"]).abs().numpy()
+        im3 = ax_err.imshow(diff_np, origin="lower", cmap="magma", aspect="equal",
+                            vmin=0.0, vmax=max(0.5, float(np.max(diff_np))))
+        ax_err.set_title(f"|{err_label} - DNS| Absolute Error", fontweight="bold")
+        plt.colorbar(im3, ax=ax_err, shrink=0.8).set_label("Absolute Error |Δρ|")
     else:
-        axes[0, 2].text(0.5, 0.5, "Exact Solver Skipped", ha="center", va="center", transform=axes[0, 2].transAxes)
-        axes[0, 2].axis("off")
-
-    # [1, 0] Absolute Error Map
-    target_prims = prims_tbnn if prims_tbnn is not None else prims_exact
-    target_name = "TBNN" if prims_tbnn is not None else "Exact"
-    if target_prims is not None:
-        diff_np = (target_prims["rho"].cpu() - coarse_final["rho_bar"]).abs().numpy()
-        im3 = axes[1, 0].imshow(diff_np, origin="lower", cmap="magma", aspect="equal", vmin=0.0, vmax=max(0.5, float(np.max(diff_np))))
-        axes[1, 0].set_title(f"|{target_name} - DNS| Absolute Error", fontweight="bold")
-        cbar_err = plt.colorbar(im3, ax=axes[1, 0], shrink=0.8)
-        cbar_err.set_label("Absolute Error |Δρ|")
-    else:
-        axes[1, 0].axis("off")
+        ax_err.axis("off")
 
     # [1, 1] Spectrum plot
-    ax_sp = axes[1, 1]
+    ax_sp = fig.add_subplot(gs_bot[1])
     ax_sp.loglog(k_dns, E_dns, "k-", lw=2, label="Filtered DNS")
     if prims_tbnn is not None and k_tbnn is not None and E_tbnn is not None:
         ax_sp.loglog(k_tbnn, E_tbnn, "r-.", lw=1.5, label="TBNN")
     if prims_unclosed is not None and k_unclosed is not None and E_unclosed is not None:
         ax_sp.loglog(k_unclosed, E_unclosed, color="tab:blue", ls="--", lw=1.5, label="Unclosed")
+    # Fixed per-variant styles rather than zipping against a short list, which
+    # silently drops any variant past the end of it.
+    for variant, (k_m, E_m) in sorted(spectra_minit.items()):
+        style = _MINIT_STYLE.get(variant, {"color": "tab:purple", "ls": "-"})
+        ax_sp.loglog(k_m, E_m, lw=1.4, alpha=0.9, label=_variant_label(variant),
+                     color=style["color"], ls=style["ls"])
     if prims_exact is not None and k_exact is not None and E_exact is not None:
         ax_sp.loglog(k_exact, E_exact, "g:", lw=1.8, label="Exact DNS")
     ax_sp.set_xlabel("k")
@@ -1226,13 +1604,17 @@ def evaluate_rollout(
     ax_sp.grid(True, alpha=0.3)
 
     # [1, 2] Band-resolved energy ratio (1.0 = matches filtered DNS at that scale)
-    ax_bar = axes[1, 2]
+    ax_bar = fig.add_subplot(gs_bot[2])
     models = []
     band_mid = []
     band_high = []
 
-    for key, label in (("persistence", "Persistence"), ("unclosed", "Unclosed"),
-                       ("tbnn", "TBNN"), ("exact", "Exact DNS")):
+    bar_entries = [("persistence", "Persistence"), ("unclosed", "Unclosed")]
+    bar_entries += [(_variant_key(v), _variant_label(v).replace(" (", "\n("))
+                    for v in sorted(prims_minit)]
+    bar_entries += [("tbnn", "TBNN"), ("exact", "Exact DNS")]
+
+    for key, label in bar_entries:
         if f"{key}_band_ratio_high" in results:
             models.append(label)
             band_mid.append(results[f"{key}_band_ratio_mid"])
@@ -1246,7 +1628,12 @@ def evaluate_rollout(
         ax_bar.axhline(1.0, color="k", ls="--", lw=1.2, label="filtered DNS")
         ax_bar.set_yscale("log")
         ax_bar.set_xticks(x)
-        ax_bar.set_xticklabels(models, fontweight="bold")
+        ax_bar.set_xticklabels(
+            models, fontweight="bold",
+            fontsize=8 if len(models) > 4 else 10,
+            rotation=30 if len(models) > 4 else 0,
+            ha="right" if len(models) > 4 else "center",
+        )
         ax_bar.set_ylabel("E / E$_{DNS}$ in band")
         ax_bar.set_title(f"Band Energy Ratio (t={snap_final['t']:.1f})", fontweight="bold")
         ax_bar.legend(loc="best", fontsize=8)
@@ -1258,7 +1645,8 @@ def evaluate_rollout(
     else:
         ax_bar.axis("off")
 
-    plt.tight_layout()
+    # No tight_layout: the gridspec above already sets its own spacing, and
+    # letting tight_layout re-pack a nested gridspec squashes the panel titles.
     fig_path = os.path.join(output_dir, "rollout_comparison.png")
     plt.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -1272,7 +1660,12 @@ def evaluate_rollout(
     with open(os.path.join(output_dir, "metrics.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    ref_history = history_tbnn if history_tbnn is not None else history_exact
+    # All runs save on the same save_interval; take the LONGEST history as the time
+    # axis, so a run that diverged early cannot truncate everyone else's frames.
+    _cands = [h for h in (history_tbnn, history_exact, history_unclosed,
+                          *[history_minit[v] for v in sorted(history_minit)])
+              if h is not None and "t" in h]
+    ref_history = max(_cands, key=lambda h: len(h["t"])) if _cands else None
     history_dns = None
     if (save_history or make_anim) and ref_history is not None and "t" in ref_history:
         times = np.asarray(ref_history["t"], dtype=np.float64)
@@ -1327,6 +1720,48 @@ def evaluate_rollout(
             "p": torch.stack(p_list, dim=0),
         }
 
+    if history_dns is not None:
+        t_lo = float(snap0["t"]) + band_skip
+        windows = band_windows or [
+            (t_lo + j * (t_end - t_lo) / 3, t_lo + (j + 1) * (t_end - t_lo) / 3) for j in range(3)
+        ]
+        windows = list(windows) + [(t_lo, t_end)]
+        runs_w = {n: h for n, h in (("unclosed", history_unclosed), ("TBNN", history_tbnn),
+                                    ("exact DNS", history_exact)) if h is not None}
+        runs_w.update({_variant_label(v): history_minit[v] for v in sorted(history_minit)})
+        # Nearest real snapshot per frame -- not history_dns, which blends two.
+        nearest = np.abs(times[:, None] - snap_times[None, :]).argmin(axis=1)
+        spacing = float(np.median(np.diff(snap_times))) if len(snap_times) > 1 else 1.0
+        valid = np.abs(times - snap_times[nearest]) <= 0.25 * spacing
+        history_ref = {
+            "t": times,
+            **{q: torch.stack([dns_cache[j][src] for j in nearest])
+               for q, src in (("rho", "rho_bar"), ("vx", "vx_tilde"), ("vy", "vy_tilde"))},
+        }
+        base = "exact DNS" if history_exact is not None else None
+        wres = windowed_band_ratios(history_ref, runs_w, valid, windows,
+                                    baseline=base, t_tol=0.25 * spacing)
+        results["windowed_band_ratios"] = wres
+        print(f"\n=== Band ratios per window: geometric mean over frames vs the nearest DNS "
+              f"snapshot (first {band_skip:g} skipped) ===")
+        if base:
+            print("  'high/oracle' is the paired ratio to the exact-stress run with a 95% block-"
+                  "bootstrap CI;\n  it, not raw retention, is the quality score (more high-k "
+                  "than the oracle is not better).\n  CIs cover frame sampling along this one "
+                  "trajectory only.")
+        for wl, rows in wres.items():
+            print(f"  t = {wl}")
+            for n, rw in rows.items():
+                vs = (f"  high/oracle {rw['vs_baseline_high']:.3f} "
+                      f"[{rw['vs_baseline_lo']:.3f}, {rw['vs_baseline_hi']:.3f}]"
+                      if "vs_baseline_high" in rw else "")
+                print(f"    {n:<36} low {rw['band_ratio_low']:.3f}  mid {rw['band_ratio_mid']:.3f}"
+                      f"  high {rw['band_ratio_high']:.3f} +- {rw['high_err']:.3f}{vs}"
+                      f"  LSD {rw['log_spectral_distance']:.3f}  KE {rw['e_ratio_total']:.3f}"
+                      f"  ({rw['n_frames']} frames{', PARTIAL' if rw['partial'] else ''})")
+        with open(os.path.join(output_dir, "metrics.json"), "w") as f:
+            json.dump(results, f, indent=2)
+
     if save_history and history_dns is not None and ref_history is not None:
         traj_path = os.path.join(output_dir, "rollout_trajectory.pt")
         traj_data = {
@@ -1335,6 +1770,12 @@ def evaluate_rollout(
             "tbnn": history_tbnn,
             "exact": history_exact,
             "unclosed": history_unclosed,
+            "minit": history_minit,
+            "minit_e_kh": {
+                v: getattr(c, "history", None)
+                for v, c in minit_closures.items()
+                if getattr(c, "history", None)
+            },
             "grid": {"Ny": Nc_y, "Nx": Nc_x, "dx": dx, "dy": dy, "r": r},
             "diverged_at": diverged_at,
         }
@@ -1349,6 +1790,7 @@ def evaluate_rollout(
             history_tbnn=history_tbnn,
             history_exact=history_exact,
             history_unclosed=history_unclosed,
+            history_minit=history_minit,
             output_path=anim_path,
             fps=anim_fps,
         )
@@ -1359,6 +1801,19 @@ def evaluate_rollout(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def _resolve_minit_variants(raw: list[str] | None) -> tuple[str, ...]:
+    """Expand the repeatable --with-minit flag, with 'both' as a shorthand."""
+    if not raw:
+        return ()
+    out: list[str] = []
+    expand = {"both": ("fitted", "paper"), "all": ("fitted", "paper", "equilibrium")}
+    for item in raw:
+        for variant in expand.get(item, (item,)):
+            if variant not in out:
+                out.append(variant)
+    return tuple(out)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate TBNN rollout")
@@ -1392,13 +1847,78 @@ if __name__ == "__main__":
                              "boxes, making its divergence compact. Without this the stress is "
                              "cell-centred and interpolated, which has zero response at 2dx. "
                              "Exact-DNS closure only; requires an even coarsening factor.")
+    parser.add_argument("--with-minit", dest="minit_variants", action="append",
+                        choices=["fitted", "paper", "equilibrium", "both", "all"],
+                        default=None,
+                        help="Add a MInIT-closed run. 'fitted' uses coefficients refit "
+                             "on this DNS by src.minit_calibrate; 'paper' transfers the "
+                             "published 3D Newtonian MHD calibration verbatim (their "
+                             "difference separates the model from its calibration); "
+                             "'equilibrium' drops the turbulent-energy ODE for its fixed "
+                             "point, which scores best a-priori. 'both' = fitted+paper, "
+                             "'all' = all three. Repeatable.")
+    parser.add_argument("--with-learned", dest="learned_coeff", action="append",
+                        default=None, metavar="CKPT",
+                        help="Add a learned-coefficient MInIT run from a "
+                             "src.train_minit_coeff checkpoint (e.g. "
+                             "results/minit/minit_coeff_residual.pt). Unlike the "
+                             "--with-minit rows this closure is stateless and takes "
+                             "no e_KH seed -- it reads only resolved state. "
+                             "Repeatable.")
+    parser.add_argument("--band-windows", nargs="+", default=None, metavar="T0:T1",
+                        help="Time windows for the windowed band ratios (needs --save-history "
+                             "or --make-anim). Default: thirds of [t_start + band_skip, t_end], "
+                             "plus the whole span.")
+    parser.add_argument("--band-skip", type=float, default=0.5,
+                        help="Skip this long after t_start in the windowed band ratios: every "
+                             "run, closed or not, loses ~70%% of its high-k energy in the "
+                             "first ~0.7 time units as the coarse solver adjusts.")
+    parser.add_argument("--with-hybrid", dest="hybrid_coeff", default=None, metavar="CKPT",
+                        help="Add a hybrid run: the TBNN's (--checkpoint) tensor shape "
+                             "scaled cell by cell to the energy of this MiNNit checkpoint.")
+    parser.add_argument("--learned-gain", type=float, default=1.0,
+                        help="Multiply the learned e_KH by this factor. The a-priori "
+                             "optimum is ~0.96, so this is not calibration: it "
+                             "deliberately over-drives the closure to offset the coarse "
+                             "solver's own numerical dissipation, which even the exact "
+                             "stress cannot undo (the oracle retains only 34%% of the "
+                             "DNS high-k energy at t=10).")
+    parser.add_argument("--minit-coefficients", type=str,
+                        default="results/minit/minit_coefficients.json",
+                        help="Refit coefficients written by src.minit_calibrate")
+    parser.add_argument("--minit-seed", type=str, default="dns", choices=["dns", "uniform"],
+                        help="e_KH = 0 is a fixed point, so MInIT needs a seed. 'dns' "
+                             "takes the exact filtered-DNS subgrid energy at t_start "
+                             "(one snapshot of ground truth, as the oracle also gets); "
+                             "'uniform' is self-contained. Different experiments.")
+    parser.add_argument("--minit-e-seed", type=float, default=1e-6,
+                        help="Uniform seed value for --minit-seed uniform")
+    parser.add_argument("--minit-floor-fraction", type=float, default=0.0,
+                        help="Hold e_KH at this fraction of its local saturation value "
+                             "so a decayed region can restart (0 disables)")
+    parser.add_argument("--minit-advect", action="store_true",
+                        help="Include the advective term the paper drops. Its periodicity "
+                             "argument holds along x here but not across the shear layer.")
+    parser.add_argument("--minit-shear-mode", type=str, default="dvxdy",
+                        choices=["dvxdy", "strain"],
+                        help="Growth-rate estimator: Eq. 23 literally, or its "
+                             "rotationally-invariant equivalent")
     parser.add_argument("--sgs-coupling", type=str, default="flux", choices=["source", "flux"],
                         help="SGS coupling mode: 'source' (legacy) or 'flux' (conservative viscous flux)")
     parser.add_argument("--save-history", action="store_true", help="Save intermediate snapshot trajectories to rollout_trajectory.pt")
     parser.add_argument("--make-anim", action="store_true", help="Generate an animated comparison GIF across the rollout")
     parser.add_argument("--anim-interval", type=float, default=0.1, help="Simulation time interval between animation frames")
     parser.add_argument("--anim-fps", type=int, default=10, help="Frames per second for generated animation")
+    add_config_arguments(parser)
+    cfg = apply_config_defaults(parser, {
+        "data_dir": "data.data_dir",
+        "coarsening_factor": "data.coarsening_factor",
+        "cfl": "solver.cfl",
+        "reconstruction": "solver.reconstruction",
+        "riemann_solver": "solver.riemann_solver",
+    })
     args = parser.parse_args()
+    configure(args, cfg)
 
     evaluate_rollout(
         data_dir=args.data_dir,
@@ -1417,6 +1937,19 @@ if __name__ == "__main__":
         tau_smooth_passes=args.tau_smooth_passes,
         face_closure=args.face_closure,
         with_unclosed=args.with_unclosed,
+        minit_variants=_resolve_minit_variants(args.minit_variants),
+        minit_coefficients=args.minit_coefficients,
+        minit_seed=args.minit_seed,
+        minit_e_seed=args.minit_e_seed,
+        minit_floor_fraction=args.minit_floor_fraction,
+        minit_advect=args.minit_advect,
+        minit_shear_mode=args.minit_shear_mode,
+        learned_coeff=tuple(args.learned_coeff or ()),
+        learned_gain=args.learned_gain,
+        hybrid_coeff=args.hybrid_coeff,
+        band_windows=[tuple(float(x) for x in w.split(":")) for w in args.band_windows]
+        if args.band_windows else None,
+        band_skip=args.band_skip,
         save_history=args.save_history,
         make_anim=args.make_anim,
         anim_interval=args.anim_interval,

@@ -16,10 +16,17 @@ wheels/
 
 # DNS data and archives (multi-GB, not versionable)
 test1/
+dns_khi/
+dns_khi_s1/
 *.zip
+*.h5
+
+# Rendered animations (regenerate with src.plot_dns_gif / --make-anim)
+*.gif
 
 # Model checkpoints and run outputs
 checkpoints/
+checkpoints_*/
 results/
 results_bak*/
 condor_logs/
@@ -32,5 +39,18 @@ transferwee/
 
 # Scratch: keep the diagnostic tooling, drop the rest
 scratch/*
+!scratch/bench_solver.py
 !scratch/diagnose_divergence.py
 !scratch/phase0_face_closure.py
+# Reproducers referenced by minit/*.md, run_filter_scan.sh and src/minit_learned.py
+!scratch/__init__.py
+!scratch/filter_scan.py
+!scratch/hybrid_apriori.py
+!scratch/minit_learned_coeff_feasibility.py
+!scratch/minit_crossrealisation.py
+!scratch/sgs_magnitude_scan.py
+!scratch/tbnn_highk_diagnosis.py
+!scratch/gpu_conv_probe.py
+!scratch/gpu_closure_probe.py
+!scratch/gpu_closure_breakdown.py
+!scratch/gpu_conv_bench.py

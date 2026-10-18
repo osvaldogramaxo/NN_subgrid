@@ -40,12 +40,17 @@ miquel/
 │   │                           #   ReduceLROnPlateau, diagnostics, and TorchScript export
 │   ├── solver.py               # GPU-accelerated 2D RHD finite-volume solver:
 │   │                           #   5th-order MP5 (or MUSCL) + HLL (or MUSTA/HLLC) + SSP-RK3
-│   └── evaluate_rollout.py     # A posteriori rollout benchmark: unclosed vs.
-│                               #   TBNN-closed vs. filtered DNS, with spectral diagnostics
+│   ├── evaluate_rollout.py     # A posteriori rollout benchmark: unclosed vs.
+│   │                           #   TBNN-closed vs. MInIT-closed vs. filtered DNS
+│   ├── minit.py                # MInIT competing SGS closure (Miravet-Tenes et al. 2023),
+│   │                           #   ported to 2D SRHD -- see MINIT.md
+│   └── minit_calibrate.py      # A priori calibration of MInIT against this project's DNS
 ├── tests/
 │   ├── test_barron_loss.py     # Adaptive robust Barron loss behavior and gradients
 │   ├── test_early_stopping.py  # LR plateau and early stopping state mechanics
 │   ├── test_kinematics.py      # Kinematic decomposition constraint verification
+│   ├── test_minit.py           # MInIT model identities, closure behavior, solver hook
+│   ├── test_minit_calibrate.py # MInIT estimator recovery and a priori scoring
 │   └── test_solver.py          # MP5 convergence (5th order), monotonicity, Riemann solvers, conservation
 ├── run_train.sh                # Shell wrapper for HTCondor training jobs
 ├── run_evaluate.sh             # Shell wrapper for HTCondor evaluation jobs

@@ -1,0 +1,12 @@
+# Hybrid (TBNN shape x MiNNit amplitude) vs its two parents, t = 1 -> 10, r = 16.
+universe       = vanilla
+executable     = ./run_evaluate.sh
+arguments      = "dns_khi 16 checkpoints_r16/best_model.pt 1.0 10.0 cuda 0.75 mp5 hllc --with-unclosed --save-history --make-anim --anim-interval 0.1 --anim-fps 10 --with-learned results/minit/minit_coeff_residual.pt --with-hybrid results/minit/minit_coeff_residual.pt --output-dir results/hybrid_rollout"
+output         = ./condor_logs/hybridroll_$(Cluster).out
+error          = ./condor_logs/hybridroll_$(Cluster).err
+log            = ./condor_logs/hybridroll_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+queue 1

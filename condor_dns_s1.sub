@@ -1,0 +1,24 @@
+# ==============================================================================
+# condor_dns.sh
+# HTCondor submit file for CRMHD-TBNN DNS Generation
+# ==============================================================================
+
+universe       = vanilla
+executable     = ./.venv/bin/python
+
+arguments = "-u -m src.generate_dns --config crmhd.toml --nx 1024 --ny 1024 --v-shear 0.4 --thickness 0.01 --seed-kmin 4 --seed-kmax 16 --seed-amplitude 0.02 --t-final 20 --n-outputs 200 --report-r 16 --seed 1 --output-dir dns_khi_s1"
+
+# Output log files
+output         = ./condor_logs/dns_s1_$(Cluster)_$(Process).out
+error          = ./condor_logs/dns_s1_$(Cluster)_$(Process).err
+log            = ./condor_logs/dns_s1_$(Cluster)_$(Process).log
+
+# Environment
+getenv         = True
+
+# Resources
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+
+queue 1

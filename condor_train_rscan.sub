@@ -1,0 +1,14 @@
+# TBNN at each filter size, trained on dns_khi (all of t = 1..20), so that
+# dns_khi_s1 stays unseen for every model in the filter scan.
+universe       = vanilla
+executable     = ./run_train.sh
+arguments      = "dns_khi $(r) 1 2500 2 1e-3 cuda 10 200 --time-range 1.0 20.0 --test-time 0 0 --tensor-floor-scope snapshot"
+environment    = "CHECKPOINT_DIR=checkpoints_r$(r)"
+output         = ./condor_logs/train_r$(r)_$(Cluster).out
+error          = ./condor_logs/train_r$(r)_$(Cluster).err
+log            = ./condor_logs/train_rscan_$(Cluster).log
+getenv         = True
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+queue r in (8, 16, 32, 64, 128)

@@ -25,6 +25,7 @@ Ideal gas EOS: p = (Γ - 1) ρ ε, h = 1 + ε + p/ρ (with Γ = 4/3)
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 import math
 import warnings
 
@@ -32,6 +33,28 @@ import numpy as np
 import torch
 
 from src.dataset import GAMMA_EOS
+
+
+def set_gamma_eos(gamma: float) -> None:
+    """Set the adiabatic index used by *both* `src.solver` and `src.dataset`.
+
+    `GAMMA_EOS` is bound into this module at import time, so rebinding
+    `src.dataset.GAMMA_EOS` alone would leave the solver on the old value.
+    Call this before the first solver call: `compute_dt` and
+    `primitives_to_conserved` may be `torch.compile`d, and a traced graph can
+    bake the constant in, so any existing dynamo cache is reset here.
+    """
+    global GAMMA_EOS
+    import src.dataset as _dataset
+
+    GAMMA_EOS = float(gamma)
+    _dataset.GAMMA_EOS = float(gamma)
+    _reset_compiled()
+    try:
+        import torch._dynamo as _dynamo
+        _dynamo.reset()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +89,46 @@ def primitives_to_conserved(
     return torch.stack([D, Sx, Sy, tau], dim=-1)
 
 
+def _c2p_newton_step(
+    D: torch.Tensor,
+    tau: torch.Tensor,
+    S_sq: torch.Tensor,
+    p: torch.Tensor,
+    gm1: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""One damped Newton update on the pressure, for `conserved_to_primitives`.
+
+    Split out as a standalone function purely so `torch.compile` can fuse the
+    whole update into a single kernel: eagerly it is ~20 elementwise passes
+    over the grid, each one a separate round trip to memory.
+    """
+    # v² = S² / (τ + D + p)²
+    z = (tau + D + p).clamp(min=1e-15)
+    v_sq = (S_sq / z**2).clamp(max=1.0 - 1e-12)
+
+    W = 1.0 / torch.sqrt(1.0 - v_sq)
+    rho = (D / W).clamp(min=1e-15)
+
+    eps = ((tau + D * (1.0 - W) + p * (1.0 - W**2)) / (D * W)).clamp(min=1e-15)
+    f = p - gm1 * rho * eps
+
+    # df/dp = 1 - (Γ-1) v² (1 - 1/h), with h = z/(D W) the specific enthalpy.
+    # Bounded in (2/3, 1] for Γ = 4/3, so no conditioning guard is needed.
+    h = z / (D * W)
+    dfdp = 1.0 - gm1 * v_sq * (1.0 - 1.0 / h)
+
+    # Damped Newton update: prevent negative overshoots and wild explosion
+    dp = -f / dfdp
+    dp = torch.where(torch.isfinite(dp), dp.clamp(-0.8 * p, 5.0 * p), torch.zeros_like(p))
+    return (p + dp).clamp(min=1e-15), dp
+
+
 def conserved_to_primitives(
     U: torch.Tensor,
     p_guess: torch.Tensor | None = None,
     max_iter: int = 30,
     tol: float = 1e-12,
+    check_every: int = 4,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     r"""Recover primitive variables (ρ, v_x, v_y, p) from conserved (D, S_x, S_y, τ)
     using a Newton-Raphson iteration on the pressure.
@@ -86,6 +144,9 @@ def conserved_to_primitives(
     p_guess : (...) tensor or None — initial pressure guess
     max_iter : int
     tol : float — convergence tolerance
+    check_every : int — test convergence every this many iterations. Each test
+        is a GPU→host sync; Newton needs ~5 iterations, so testing every
+        iteration costs more in stalls than the extra iterations cost in flops.
 
     Returns
     -------
@@ -111,37 +172,15 @@ def conserved_to_primitives(
             p_safe,
         ).clamp(min=1e-15)
 
-    for _ in range(max_iter):
-        # v² = S² / (τ + D + p)²
-        z = (tau + D + p).clamp(min=1e-15)
-        v_sq = (S_sq / z**2).clamp(max=1.0 - 1e-12)
-
-        W = 1.0 / torch.sqrt(1.0 - v_sq)
-        rho = (D / W).clamp(min=1e-15)
-
-        eps = (tau + D * (1.0 - W) + p * (1.0 - W**2)) / (D * W)
-        eps = eps.clamp(min=1e-15)
-
-        p_eos = gm1 * rho * eps
-
-        # Residual
-        f = p - p_eos
-
-        # df/dp = 1 - (Γ-1) v² (1 - 1/h), with h = z/(D W) the specific enthalpy.
-        # Bounded in (2/3, 1] for Γ = 4/3, so no conditioning guard is needed.
-        h = z / (D * W)
-        dfdp = 1.0 - gm1 * v_sq * (1.0 - 1.0 / h)
-
-        dp = -f / dfdp
-        # Damped Newton update: prevent negative overshoots and wild explosion
-        dp = torch.where(
-            torch.isfinite(dp),
-            dp.clamp(-0.8 * p, 5.0 * p),
-            torch.zeros_like(p),
-        )
-        p = (p + dp).clamp(min=1e-15)
-
-        if bool((dp.abs() <= tol * p).all()):
+    # The convergence test is a host synchronisation, so testing it on every
+    # iteration serialises the GPU pipeline once per iteration. Newton converges
+    # here in ~5 iterations from a cold start, and extra iterations past
+    # convergence are no-ops (dp = 0), so checking every `check_every`-th
+    # iteration gives the same answer for a fraction of the stalls.
+    step_fn = _get_compiled_newton_step() if U.is_cuda else _c2p_newton_step
+    for i in range(max_iter):
+        p, dp = step_fn(D, tau, S_sq, p, gm1)
+        if (i + 1) % check_every == 0 and bool((dp.abs() <= tol * p).all()):
             break
 
     # Non-convergence is deliberately NOT laundered here: a failed inversion must stay
@@ -1251,6 +1290,64 @@ if _cuda_usable():
 
 
 # ---------------------------------------------------------------------------
+# Lazy compilation of the hot path
+# ---------------------------------------------------------------------------
+#
+# `compute_rhs` dominates the step: measured at 1024² float64 on a V100 it is
+# 70.4 ms of a 229 ms step (92%, three RK stages), because eagerly it is many
+# hundreds of small elementwise kernels — MP5's minmod/median logic over four
+# variables, two directions and two interface states — each a separate round
+# trip to memory. Inductor fuses those chains and it drops to 5.8 ms (12x).
+#
+# Compiled lazily rather than at import: tracing costs ~17 s, which is free
+# next to a multi-hour DNS run but not worth paying in a CPU-only unit test.
+# Both functions close over GAMMA_EOS, so `set_gamma_eos` discards them.
+
+_COMPILE_ENABLED = True
+_COMPILED_RHS: Any = None
+_COMPILED_NEWTON: Any = None
+
+
+def set_compile(enabled: bool) -> None:
+    """Enable or disable lazy `torch.compile` of the hot path (default: on)."""
+    global _COMPILE_ENABLED, _COMPILED_RHS, _COMPILED_NEWTON
+    _COMPILE_ENABLED = bool(enabled)
+    _COMPILED_RHS = None
+    _COMPILED_NEWTON = None
+
+
+def _reset_compiled() -> None:
+    global _COMPILED_RHS, _COMPILED_NEWTON
+    _COMPILED_RHS = None
+    _COMPILED_NEWTON = None
+
+
+def _get_compiled_newton_step():
+    global _COMPILED_NEWTON
+    if not _COMPILE_ENABLED:
+        return _c2p_newton_step
+    if _COMPILED_NEWTON is None:
+        try:
+            _COMPILED_NEWTON = torch.compile(_c2p_newton_step, dynamic=False)
+        except Exception:
+            _COMPILED_NEWTON = _c2p_newton_step
+    return _COMPILED_NEWTON
+
+
+def _dispatch_rhs(prims: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    """Dispatch to the compiled `compute_rhs` on CUDA, the eager one elsewhere."""
+    global _COMPILED_RHS
+    if not (_COMPILE_ENABLED and prims.is_cuda):
+        return compute_rhs(prims, *args, **kwargs)
+    if _COMPILED_RHS is None:
+        try:
+            _COMPILED_RHS = torch.compile(compute_rhs, dynamic=False)
+        except Exception:
+            _COMPILED_RHS = compute_rhs
+    return _COMPILED_RHS(prims, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
 # 3rd-Order Runge-Kutta (SSP-RK3) Time Integrator
 # ---------------------------------------------------------------------------
 
@@ -1407,7 +1504,7 @@ class RHDSolver:
         # ---------------------------------------------------------------
         # Stage 1: U¹ = Uⁿ + Δt L(Uⁿ)
         sgs1 = sgs_model(self.prims) if sgs_model is not None else sgs_source
-        rhs1 = compute_rhs(
+        rhs1 = _dispatch_rhs(
             self.prims, self.dx, self.dy, sgs1,
             reconstruction=self.reconstruction,
             riemann_solver=self.riemann_solver,
@@ -1420,7 +1517,7 @@ class RHDSolver:
 
         # Stage 2: U² = ¾ Uⁿ + ¼ (U¹ + Δt L(U¹))
         sgs2 = sgs_model(prims_1) if sgs_model is not None else sgs_source
-        rhs2 = compute_rhs(
+        rhs2 = _dispatch_rhs(
             prims_1, self.dx, self.dy, sgs2,
             reconstruction=self.reconstruction,
             riemann_solver=self.riemann_solver,
@@ -1433,7 +1530,7 @@ class RHDSolver:
 
         # Stage 3: Uⁿ⁺¹ = ⅓ Uⁿ + ⅔ (U² + Δt L(U²))
         sgs3 = sgs_model(prims_2) if sgs_model is not None else sgs_source
-        rhs3 = compute_rhs(
+        rhs3 = _dispatch_rhs(
             prims_2, self.dx, self.dy, sgs3,
             reconstruction=self.reconstruction,
             riemann_solver=self.riemann_solver,
@@ -1530,7 +1627,7 @@ class RHDSolver:
             delta_Fx_k: torch.Tensor,
             delta_Fy_k: torch.Tensor,
         ) -> torch.Tensor:
-            return compute_rhs(
+            return _dispatch_rhs(
                 prims_k, self.dx, self.dy,
                 sgs_viscous_Fx=delta_Fx_k,
                 sgs_viscous_Fy=delta_Fy_k,
@@ -1662,13 +1759,28 @@ class RHDSolver:
 
             dt = min(dt, t_final - self.t)
 
-            # Synchronise time-dependent SGS models (e.g. ExactDNSSGSModel)
-            if sgs_model is not None and hasattr(sgs_model, "set_time"):
-                sgs_model.set_time(self.t)
+            # Synchronise time-dependent SGS closures (e.g. the exact-DNS oracle,
+            # which interpolates a precomputed stress between snapshots).
+            # Both coupling paths need this: without it the oracle silently runs
+            # with the stress frozen at its first snapshot for the whole rollout,
+            # which is indistinguishable from a working oracle in the output and
+            # quietly destroys the one baseline every other result is judged
+            # against.
+            for _sgs in (sgs_model, sgs_closure):
+                if _sgs is not None and hasattr(_sgs, "set_time"):
+                    _sgs.set_time(self.t)
 
             # Pass the SGS model callable so step() re-evaluates it at
             # each SSP-RK3 sub-stage, preserving the SSP stability property.
             actual_dt = self.step(dt, sgs_model=sgs_model, sgs_closure=sgs_closure)
+
+            # Stateful closures (e.g. MInIT, which evolves a turbulent energy
+            # density alongside the fluid) advance their own state once per
+            # completed step. Splitting it out this way keeps the closure
+            # protocol inside step() stateless: the RK stages and the
+            # predictor-corrector recoveries all see one frozen state.
+            if sgs_closure is not None and hasattr(sgs_closure, "advance"):
+                sgs_closure.advance(self.prims, actual_dt, t=self.t)
 
             # Strict divergence check after advance
             if not math.isfinite(actual_dt) or not torch.isfinite(self.prims).all():

@@ -1,0 +1,11 @@
+universe       = vanilla
+executable     = ./run_gpuprobe.sh
+arguments      = "scratch/gpu_closure_probe.py"
+output         = ./condor_logs/gpuprobe_$(Cluster).out
+error          = ./condor_logs/gpuprobe_$(Cluster).err
+log            = ./condor_logs/gpuprobe_$(Cluster).log
+getenv         = True
+request_cpus   = 1
+request_memory = 4096
+request_gpus   = 1
+queue 1

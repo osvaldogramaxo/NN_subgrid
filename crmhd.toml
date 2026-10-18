@@ -1,0 +1,135 @@
+# CRMHD-TBNN configuration
+#
+# Values here are defaults for every entry point (generate_dns, train_apriori,
+# evaluate_rollout). Command-line flags override them.
+#
+# On [physics].gamma specifically: a dataset that records its own EOS in a
+# `Metadata` group wins over this file, and a contradiction is a hard error
+# rather than a warning. This file supplies gamma only for legacy data that
+# carries no metadata -- and for that case, confirm it first with:
+#
+#     python -m src.config verify <data-dir>
+#
+# Inspect what a run will actually use with:
+#
+#     python -m src.config show --data-dir <data-dir>
+
+[physics]
+# 4/3 for a relativistically hot ideal gas, 5/3 for a monatomic ideal gas.
+# NOTE: the Aenus data in test1/ is Newtonian with gamma = 5/3, verified to
+# machine precision. Data produced by src/generate_dns.py is SRHD with 4/3
+# and records that fact in its own metadata.
+gamma = 1.3333333333333333
+scheme = "SRHD"
+
+[solver]
+cfl = 0.4
+reconstruction = "mp5"      # "mp5" | "muscl"
+riemann_solver = "hllc"     # "hll" | "hllc" | "musta_hll"
+dtype = "float64"
+device = "auto"             # "auto" | "cpu" | "cuda"
+
+# Lazily torch.compile the solver hot path on CUDA. Measured on a V100 at
+# 1024^2 float64: 232.6 ms/step eager -> 25.1 ms/step compiled (9.3x), with
+# bit-identical output. Costs ~17 s of tracing per distinct call signature,
+# so set false for very short runs where that will not amortise.
+compile = true
+
+[data]
+# Points at data produced by src/generate_dns.py, which records its own EOS
+# and so cannot be silently mispaired with [physics].gamma above.
+#
+# To work with the legacy Aenus data instead, set BOTH:
+#     data_dir = "test1"
+#     gamma    = 1.6666666666666667     # in [physics]
+# test1/ carries no metadata, so nothing will catch the mistake for you --
+# only the "no EOS metadata" warning, which does not know the right answer.
+data_dir = "dns_khi"
+# r = 16: at r = 4 only ~0.018% of kinetic energy was subgrid, far too little
+# for any closure to matter. In 2D the enstrophy cascade is steep (~k^-3), so
+# the subgrid fraction falls off fast with r and 16 is close to a floor.
+coarsening_factor = 16
+stride = 1
+
+[training]
+# Window used for training and validation, interleaved inside it. dns_khi
+# spans t = 0..8; before t ~ 1 the subgrid fraction of kinetic energy is
+# ~0.03% (diagnostics.json), so those snapshots carry no closure signal and,
+# under a per-point normalised tensor loss, only contribute amplified noise.
+time_lo = 1.0
+time_hi = 6.5
+
+# Contiguous window held out for the final measurement only -- never used for
+# training or for choosing the best checkpoint. Set test_lo >= test_hi to
+# disable the test split.
+test_lo = 6.5
+test_hi = 1e30
+
+# One in every N snapshots of the window goes to validation. Interleaved, not
+# contiguous: the subgrid fraction rises 40x across this run, so a contiguous
+# late window is a different regime rather than a held-out sample of the same
+# one. The previous split (train t in [1,70], val t in [70,85]) had train and
+# val tau scales differing by 2.2x, which by itself produced the apparent
+# train/val loss gap.
+val_every = 5
+
+# Snapshots per optimizer step. At r = 16 one snapshot is a 64x64 coarse field
+# (4096 points), so 2 gives ~8k points per step. Batching by snapshot is what
+# lets L_spectral be evaluated on the exact periodic field inside the same
+# backward pass as the point-wise terms, instead of in a separate pass with
+# its own optimizer step.
+snapshots_per_batch = 2
+
+lr = 1e-3
+# "plateau" (on the EMA-smoothed metric) or "cosine" (with warmup). Measured
+# on dns_khi: plateau matched or beat cosine (test rel_L2 85.1% vs 86.6%) and
+# adapts its reductions to how the run actually goes instead of committing to
+# a total epoch count in advance -- which also matters for --resume, where
+# the final epoch count is not known upfront. Plateau was the earlier
+# problem only because its reductions fired on sampling noise from the old
+# two-phase spectral pass; that noise source (a separate optimizer step for
+# L_spectral) is gone now that batching is snapshot-granular.
+lr_schedule = "plateau"
+warmup_epochs = 5
+# Gradient clipping. "adaptive" clips at grad_clip_mult x the running median
+# gradient norm. A fixed threshold is wrong for this objective: L_tensor is a
+# ratio floored at the median ||tau||_F (~1.3e-3), so the gradient norm runs
+# 1e1-1e3 through a healthy run and a clip of 1.0 fires on every single step,
+# replacing the gradient magnitude with a constant instead of catching
+# outliers. Watch the clip_frac column in metrics.csv stay low.
+grad_clip_mode = "adaptive"
+grad_clip_mult = 5.0
+
+# EMA factor for the validation metric that drives best-checkpoint selection,
+# LR reduction and early stopping. 0.8 ~ 5 epochs. With 0 (raw), the previous
+# run's "best" checkpoint was a -1.8 sigma draw (16.3% against mean 19.4%,
+# sd 1.7%) rather than a better model.
+monitor_ema = 0.8
+
+# Loss weights. Every component is dimensionless, so these are comparable
+# across datasets and coarsening factors.
+loss_alpha = 0.5        # L_P, dissipation-rate matching
+loss_beta = 0.1         # L_spectral, cascade matching
+# L_ortho. Identically zero for this architecture: the output is a linear
+# combination of basis tensors and u_mu E^{mu nu} = 0 holds to ~3e-16, so any
+# weight buys nothing. Set > 0 only to run it as a diagnostic.
+loss_gamma = 0.0
+loss_delta = 2.0        # L_WEC, realizability
+
+# Fraction of resolved comoving energy density the prediction must retain
+# before L_WEC activates. 0 recovers the plain WEC hinge, which cannot fire on
+# this data: resolved energy density is >= 2.1 (mean 9.3) while the largest
+# exact ||tau||_F is 0.47.
+wec_margin = 0.5
+
+# Per-point L_tensor denominator floor, as a quantile of the training
+# ||tau||_F distribution. The median damps the below-median half of the domain
+# instead of amplifying it. A quantile rather than a fraction of the mean
+# because the distribution is heavy-tailed: mean/median ~5.2 over the dns_khi
+# training window. Measured share of the loss carried by the weakest decile
+# (uniform-error regime): 43% at 0.05*mean, 20% at the median, 14.5% at
+# 0.5*mean. The old batch-level normaliser gave it ~0% and let a handful of
+# strong cells dominate.
+tensor_floor_quantile = 0.5
+
+lambda_stab = 10.0

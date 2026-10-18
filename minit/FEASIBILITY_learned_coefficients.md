@@ -447,14 +447,19 @@ over time. $r = 128$ (8×8 grid) lies beyond the inertial range and is a control
 
 High-$k$ fraction of $\tau$ (exact ≈ 45–50%): MiNNit 45.3 / 42.8 / 38.1 / 39.0%, TBNN
 41.7 / 37.3 / 35.4 / 36.1% for $r = 8$–$64$. $\Pi/\Pi_\text{ex}$ at $r = 8$–$32$: TBNN
-0.65–0.68, MiNNit 0.56 / 0.53 / 0.44; at $r \ge 64$ the mean transfer is near zero and the
-ratio is meaningless.
+0.65–0.68, MiNNit 0.56 / 0.53 / 0.44; at $r \ge 64$ the ratio is unusable. *Corrected
+2026-10-19:* not because the mean transfer is near zero (it is −9.2e-3 at $r=64$ vs −1.05e-2 at
+$r=32$), but because the exact transfer crosses zero in a few snapshots ($t=2$–3 at $r=64$) and
+those near-zero denominators dominate the average of per-snapshot ratios.
 
 1. **The ansatz ceiling is filter-independent** (paper Fig. 13 reproduced). **The TBNN's
    correlation is too, and sits above that ceiling at every $r$** — the fixed-$\beta$
    constraint of §5 is real.
 2. **On Eq. 25 the ranking depends on filter size:** MiNNit wins at $r=8$, ties at 16, the
-   TBNN wins from 32 up. Eq. 25 punishes the TBNN's amplitude deficit (0.76–0.84), which is
+   TBNN wins from 32 up. *Corrected 2026-10-19:* that RMS ranking is driven by the TBNN's
+   late-time collapse at small $r$ (Eq. 25 up to 1.8 at $t = 17$–20, $r=8$). Per snapshot the
+   TBNN is better at every $r$: median 0.58 / 0.60 / 0.60 / 0.58 vs MiNNit 0.80 / 0.79 /
+   0.81 / 0.77 at $r$ = 8 / 16 / 32 / 64. Eq. 25 punishes the TBNN's amplitude deficit (0.76–0.84), which is
    why its large correlation lead does not translate one-for-one.
 3. **MiNNit keeps more high-$k$ and more amplitude at every $r$; the TBNN has better
    correlation and transfer.** Same split as §10, now on clean data.
@@ -603,3 +608,38 @@ High band (k > k_max/3) relative to the oracle, paired, 95% CI, hybrid rollout $
 5. **Scope:** every CI here covers frame sampling along one trajectory. It does not cover
    initial-condition, DNS-seed or training-seed variability. To make any of these a property
    of the closure, repeat on `dns_khi_s1` or on perturbed initial states.
+
+
+---
+
+## 18. Rollout ensemble: no closure is reliably better in long rollouts (2026-10-19)
+
+`condor_ensemble.sub`: `dns_khi` and the unseen `dns_khi_s1`, 4 members each (member 0
+unperturbed, then `--perturb-seed` 1–3 at 1e-3 of the rms velocity, $k \le N/8$), all five runs
+per member from the same state, $r=16$, $t = 1\to10$, models trained on `dns_khi` only.
+Aggregated by `scratch/ensemble_summary.py` (mean ± s.e. over members).
+
+Pooled, whole window $t = 1.5$–10:
+
+| run | log-spectral distance | total KE | high band / oracle | mid band |
+|---|---|---|---|---|
+| unclosed | 0.584 ± 0.013 | 0.940 ± 0.031 | 1.03 ± 0.03 | 0.90 ± 0.03 |
+| TBNN | 0.613 ± 0.012 | 0.994 ± 0.014 | 0.99 ± 0.03 | 0.87 ± 0.02 |
+| MiNNit | 0.599 ± 0.004 | 1.005 ± 0.008 | 0.99 ± 0.01 | 0.85 ± 0.01 |
+| hybrid | 0.605 ± 0.007 | 0.996 ± 0.002 | 0.99 ± 0.02 | 0.88 ± 0.00 |
+| oracle | 0.581 ± 0.009 | 1.005 ± 0.007 | 1 | 0.85 ± 0.01 |
+
+1. **No learned closure is reliably better than another.** Paired spectral distance, hybrid
+   minus TBNN −0.008 ± 0.006, minus MiNNit +0.006 ± 0.003. The single-run "hybrid has the best
+   spectrum" (§15) is not confirmed.
+2. **The realisation decides the ranking.** On `dns_khi` the unclosed run matches the oracle and
+   every closure is slightly worse; on `dns_khi_s1` the unclosed run loses 24% of its kinetic
+   energy late (KE 0.761 at $t=7$–10), every closure prevents that, and MiNNit is closest to
+   the oracle (late LSD 0.709 vs oracle 0.702, hybrid 0.741, TBNN 0.775, unclosed 0.791).
+3. **The hybrid's one consistent advantage is its energy budget:** total KE 0.996 ± 0.002,
+   the most stable of any run, the oracle included.
+4. **The perturbation was too small to make independent members.** At 1e-3 the four
+   `dns_khi` members agree to three decimals in the first two windows; late windows differ by
+   up to ±0.04. This is effectively **two** independent samples (the DNS realisations), so the
+   errors above understate the real spread. More DNS seeds, or perturbations of ~1e-2, are
+   needed before any long-rollout ranking.

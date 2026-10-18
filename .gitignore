@@ -54,3 +54,4 @@ scratch/*
 !scratch/gpu_closure_probe.py
 !scratch/gpu_closure_breakdown.py
 !scratch/gpu_conv_bench.py
+!scratch/ensemble_summary.py

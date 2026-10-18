@@ -79,3 +79,21 @@ def test_misaligned_frames_are_dropped_and_flagged():
     w = windowed_band_ratios(DNS, {"a": run}, ALL, [(0.0, 4.0)], t_tol=0.025)["0-4"]["a"]
     assert w["n_frames"] == 20 and w["partial"]
     assert math.isclose(w["band_ratio_high"], 1.0, rel_tol=1e-9)
+
+
+def test_perturbation_is_small_large_scale_and_reproducible():
+    from src.evaluate_rollout import perturb_initial_state
+
+    g = torch.Generator().manual_seed(1)
+    c = {k: torch.randn(64, 64, generator=g, dtype=torch.float64) for k in ("vx_tilde", "vy_tilde")}
+    c["rho_bar"] = torch.ones(64, 64, dtype=torch.float64)
+    a, b = perturb_initial_state(c, 7, 1e-3), perturb_initial_state(c, 7, 1e-3)
+    assert torch.equal(a["vx_tilde"], b["vx_tilde"])                      # reproducible
+    assert not torch.equal(a["vx_tilde"], perturb_initial_state(c, 8)["vx_tilde"])
+    d = a["vx_tilde"] - c["vx_tilde"]
+    rms = float(torch.sqrt((c["vx_tilde"] ** 2 + c["vy_tilde"] ** 2).mean()))
+    assert abs(float(d.std()) / rms - 1e-3) < 1e-6                         # amplitude
+    P = torch.fft.fft2(d).abs() ** 2
+    k = torch.fft.fftfreq(64, d=1 / 64).abs()
+    assert float(P[(k[:, None] ** 2 + k[None, :] ** 2).sqrt() > 8].sum()) < 1e-20  # k <= N/8
+    assert torch.equal(a["rho_bar"], c["rho_bar"])

@@ -140,6 +140,30 @@ def spectral_metrics(
     return out
 
 
+def perturb_initial_state(coarse: dict, seed: int, amplitude: float = 1e-3) -> dict:
+    """Add a small large-scale velocity perturbation to the filtered initial state.
+
+    One rollout is one draw of a chaotic trajectory, so a ranking between closures needs
+    several. Every run in an evaluation starts from the same perturbed state, so the
+    comparison between closures stays paired within a member. The noise is band-limited
+    to k <= N/8 (grid-scale noise would just be dissipated), scaled to ``amplitude``
+    times the rms velocity, and leaves density and pressure untouched.
+    """
+    g = torch.Generator().manual_seed(int(seed))
+    vx, vy = coarse["vx_tilde"], coarse["vy_tilde"]
+    Ny, Nx = vx.shape
+    ky = torch.fft.fftfreq(Ny, d=1.0 / Ny).abs()[:, None]
+    kx = torch.fft.fftfreq(Nx, d=1.0 / Nx).abs()[None, :]
+    keep = ((kx**2 + ky**2).sqrt() <= min(Ny, Nx) / 8).to(vx.dtype)
+    rms = float(torch.sqrt((vx**2 + vy**2).mean()))
+    out = dict(coarse)
+    for key, v in (("vx_tilde", vx), ("vy_tilde", vy)):
+        noise = torch.randn(Ny, Nx, generator=g, dtype=torch.float64).to(v)
+        noise = torch.fft.ifft2(torch.fft.fft2(noise) * keep).real
+        out[key] = v + amplitude * rms * noise / noise.std().clamp(min=1e-300)
+    return out
+
+
 def windowed_band_ratios(
     history_ref: dict,
     runs: dict[str, dict],
@@ -992,6 +1016,8 @@ def evaluate_rollout(
     hybrid_coeff: str | None = None,
     band_windows: list[tuple[float, float]] | None = None,
     band_skip: float = 0.5,
+    perturb_seed: int = 0,
+    perturb_amplitude: float = 1e-3,
     save_history: bool = False,
     make_anim: bool = False,
     anim_interval: float = 0.1,
@@ -1106,6 +1132,10 @@ def evaluate_rollout(
     p0 = torch.tensor(snap0["p"], dtype=dtype)
 
     coarse0 = relativistic_favre_filter(rho0, vx0, vy0, p0, r)
+    if perturb_seed:
+        coarse0 = perturb_initial_state(coarse0, perturb_seed, perturb_amplitude)
+        print(f"Initial state perturbed: seed {perturb_seed}, amplitude {perturb_amplitude:g} "
+              f"x rms velocity at k <= N/8 (same for every run)")
 
     # --- Solver 1: TBNN-closed (if checkpoint exists) ---
     prims_tbnn = None
@@ -1869,6 +1899,11 @@ if __name__ == "__main__":
                         help="Time windows for the windowed band ratios (needs --save-history "
                              "or --make-anim). Default: thirds of [t_start + band_skip, t_end], "
                              "plus the whole span.")
+    parser.add_argument("--perturb-seed", type=int, default=0,
+                        help="Perturb the filtered initial state (0 = off). Each seed is one "
+                             "ensemble member; all runs in one invocation share it.")
+    parser.add_argument("--perturb-amplitude", type=float, default=1e-3,
+                        help="Perturbation size as a fraction of the rms velocity")
     parser.add_argument("--band-skip", type=float, default=0.5,
                         help="Skip this long after t_start in the windowed band ratios: every "
                              "run, closed or not, loses ~70%% of its high-k energy in the "
@@ -1950,6 +1985,8 @@ if __name__ == "__main__":
         band_windows=[tuple(float(x) for x in w.split(":")) for w in args.band_windows]
         if args.band_windows else None,
         band_skip=args.band_skip,
+        perturb_seed=args.perturb_seed,
+        perturb_amplitude=args.perturb_amplitude,
         save_history=args.save_history,
         make_anim=args.make_anim,
         anim_interval=args.anim_interval,

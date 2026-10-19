@@ -463,12 +463,22 @@ class HybridClosure:
     times the snapshot's mean MiNNit energy, or negative), the cell falls back to
     MiNNit's own ``beta_ij e`` -- the same normalisation, since
     ``(beta_xx + beta_yy)/2 = 1``. No new training: both parts are the fitted models.
+
+    The result is clipped for realizability *after* the rescale (``clip_mode``,
+    ``‖τ‖_F ≤ κ p`` by default, the same bound the TBNN closure applies). The TBNN
+    closure clips its own output, but the rescale ``e_MiNNit / e_TBNN`` reaches ~20x
+    where ``e_TBNN`` sits just above the floor, so without a second clip the hybrid
+    stress is unbounded -- it diverged in 1 of 14 rollouts that way (FEASIBILITY
+    §19-20). ``clip_mode=None`` restores the unclipped behaviour.
     """
 
     def __init__(self, tbnn_closure, learned_closure: LearnedMInITClosure,
-                 floor: float = 0.05):
+                 floor: float = 0.05, clip_mode: str | None = "frobenius",
+                 clip_kappa: float = 0.5):
         self.tbnn, self.learned, self.floor = tbnn_closure, learned_closure, floor
+        self.clip_mode, self.clip_kappa = clip_mode, clip_kappa
         self.fallback_fraction: float | None = None    # diagnostic, last call
+        self.max_scale: float | None = None             # diagnostic, last call
 
     def __call__(self, prims: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         tau_t, alpha = self.tbnn(prims)
@@ -479,4 +489,8 @@ class HybridClosure:
         scale = torch.where(ok, e_l / e_t.clamp(min=1e-300), torch.zeros_like(e_t))
         tau = torch.where(ok[..., None, None], tau_t * scale[..., None, None], tau_l)
         self.fallback_fraction = float((~ok).double().mean())
+        self.max_scale = float(scale.max())
+        if self.clip_mode is not None:
+            from src.solver import clip_sgs_tensor
+            tau = clip_sgs_tensor(tau, prims, mode=self.clip_mode, kappa=self.clip_kappa)
         return tau, alpha

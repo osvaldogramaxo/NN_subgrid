@@ -1,0 +1,13 @@
+# Reproduce the hybrid's divergence on GPU (dns_khi, perturb seed 2, 1%) and test
+# the clip-after-rescale fix. FEASIBILITY §20.
+universe       = vanilla
+executable     = ./run_gpuprobe.sh
+arguments      = "scratch/hybrid_divergence_probe.py $(mode) cuda 2"
+output         = ./condor_logs/hprobe_$(Cluster)_$(mode).out
+error          = ./condor_logs/hprobe_$(Cluster)_$(mode).err
+log            = ./condor_logs/hprobe_$(Cluster).log
+getenv         = True
+request_cpus   = 2
+request_memory = 8192
+request_gpus   = 1
+queue mode in (unclipped, clipped)

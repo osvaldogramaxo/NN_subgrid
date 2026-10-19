@@ -55,3 +55,4 @@ scratch/*
 !scratch/gpu_closure_breakdown.py
 !scratch/gpu_conv_bench.py
 !scratch/ensemble_summary.py
+!scratch/hybrid_divergence_probe.py

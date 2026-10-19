@@ -544,7 +544,8 @@ class TestHybridClosure:
             def __call__(self, prims):
                 return tau_t, torch.ones(prims.shape[:-1], dtype=DT)
 
-        return HybridClosure(Stub(), learned), learned, tau_t, p
+        # clip_mode=None: these tests isolate the rescale; TestHybridClip covers the clip
+        return HybridClosure(Stub(), learned, clip_mode=None), learned, tau_t, p
 
     def test_energy_is_minnit_and_shape_is_tbnn(self):
         h, learned, tau_t, p = self._hybrid()
@@ -567,3 +568,40 @@ class TestHybridClosure:
         tau, _ = h(p)
         expect = p[..., 1:2] * tau[..., 1, :] + p[..., 2:3] * tau[..., 2, :]
         assert torch.allclose(tau[..., 0, :], expect, atol=1e-14)
+
+
+class TestHybridClip:
+    """The rescale e_MiNNit/e_TBNN reached ~760x in a rollout, putting the stress up to
+    170x over the realizability bound; the hybrid then diverged. The post-rescale clip
+    must bound it, and clip_mode=None must keep the old behaviour for A/B runs."""
+
+    def _closures(self):
+        from src.minit_learned import HybridClosure
+
+        learned = LearnedMInITClosure(_net(), _cfg(), 1 / 16, 1 / 16)
+        p = _prims()
+        tau_t, _ = learned(p)
+        tau_t = tau_t.clone()
+        tau_t[:4] *= 1e-3                        # tiny TBNN energy -> huge rescale factor
+
+        class Stub:
+            def __call__(self, prims):
+                return tau_t, torch.ones(prims.shape[:-1], dtype=DT)
+
+        return p, (lambda **kw: HybridClosure(Stub(), learned, floor=1e-6, **kw))
+
+    def test_clipped_stress_respects_the_bound(self):
+        p, make = self._closures()
+        learned_gain = make()
+        learned_gain.learned.cfg.gain = 1e4      # force MiNNit energy far above the bound
+        tau, _ = learned_gain(p)
+        bound = 0.5 * p[..., 3]
+        assert (torch.norm(tau, dim=(-2, -1)) <= bound * (1 + 1e-12)).all()
+
+    def test_clip_off_keeps_the_old_unbounded_behaviour(self):
+        p, make = self._closures()
+        h = make(clip_mode=None)
+        h.learned.cfg.gain = 1e4
+        tau, _ = h(p)
+        assert (torch.norm(tau, dim=(-2, -1)) > 0.5 * p[..., 3]).any()
+        assert h.max_scale > 100

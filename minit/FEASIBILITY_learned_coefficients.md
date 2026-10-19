@@ -654,10 +654,8 @@ Members now genuinely diverge: density correlation with the unperturbed member a
 $t = 3 / 6 / 10$ is 0.99 / 0.59–0.94 / **0.08–0.83**, against 1.00 / 0.99 / 0.80–0.98 at 1e-3.
 
 **The hybrid diverged** (non-finite state at $t = 5.37$) in `dns_khi` member 2 — 1 of 14
-hybrid rollouts over both ensembles; no other closure diverged. Untested hypothesis: the
-cell-by-cell rescale is applied *after* the TBNN closure's realizability clip, and where
-$e_\text{TBNN}$ sits just above the 5% fallback floor the factor can reach ~20×, so the hybrid
-stress is unbounded. Candidate fix: clip after rescaling.
+hybrid rollouts over both ensembles; no other closure diverged. Cause confirmed and
+fixed in §20.
 
 Pooled, $t = 1.5$–10 (7 hybrid members):
 
@@ -681,3 +679,36 @@ Pooled, $t = 1.5$–10 (7 hybrid members):
    the lowest correlation; over one 0.1 interval the TBNN and hybrid beat MiNNit; in long
    rollouts MiNNit is best and the hybrid is worst and least stable. A-priori and short-horizon
    scores do not predict long-rollout quality here.
+
+
+---
+
+## 20. The hybrid's divergence: cause and clip-after-rescale fix (2026-10-19)
+
+**Cause.** `HybridClosure` rescaled the TBNN stress by $e_\text{MiNNit}/e_\text{TBNN}$ *after* the
+TBNN closure's realizability clip ($\lVert\tau\rVert_F \le 0.5\,p$), so nothing bounded the
+result. `scratch/hybrid_divergence_probe.py` (hybrid only, the diverged member) logs it: the
+rescale factor reaches **~760×** (the fallback floor is relative to the *mean* MiNNit energy,
+so it does not cap the local ratio), and around $t = 5.0$–5.4 — when the original run
+diverged — the stress spikes to **4.5–172× the bound**, on CPU and GPU alike.
+
+**Fix.** `HybridClosure(clip_mode="frobenius", clip_kappa=0.5)` clips after the rescale
+(default); `clip_mode=None` / `--hybrid-no-clip` restores the old behaviour.
+
+**What it costs.** Nothing measurable, and a-priori it helps where it engages:
+
+| r | Eq. 25 unclipped → clipped | amplitude | corr |
+|---|---|---|---|
+| 8 | 0.530 → **0.444** | 1.107 → 1.038 | 0.902 → 0.913 |
+| 16 | 0.484 → **0.468** | 0.946 → 0.913 | 0.902 → 0.907 |
+| 32 | 0.515 → 0.515 | unchanged (clip never engages) | |
+
+Short-horizon skill changes by +0.08% (`dns_khi`) and +0.007% (`dns_khi_s1`), within noise.
+
+**Rollouts** (`condor_ensemble_fix.sub`, all closures rerun, 1% ensemble): the clipped hybrid
+finished in **8/8** members. The diverged member rerun *without* the clip also finished, so the
+original blow-up did not recur (the other closures reproduced their earlier numbers to three
+decimals; a node-level floating-point difference is the likely reason). The fix is therefore
+supported by the mechanism, not by a reproduced failure. The long-rollout ranking is
+unchanged: hybrid spectral distance 0.618 ± 0.008; MiNNit still closer to the DNS than the
+hybrid in 8/8 paired members (+0.023 ± 0.004), hybrid and TBNN still tied (+0.006 ± 0.009).

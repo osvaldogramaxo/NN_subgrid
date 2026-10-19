@@ -1,0 +1,24 @@
+# Rollout ensemble at 1% with the clip-after-rescale hybrid (FEASIBILITY §20). All closures
+# rerun in every member so comparisons stay paired. The last job reruns the member whose
+# hybrid diverged, WITHOUT the clip, as a reproduction attempt.
+universe       = vanilla
+executable     = ./run_evaluate.sh
+arguments      = "$(data) 16 checkpoints_r16/best_model.pt 1.0 10.0 cuda 0.75 mp5 hllc --with-unclosed --save-history --anim-interval 0.1 --with-learned results/minit/minit_coeff_residual.pt --with-hybrid results/minit/minit_coeff_residual.pt --perturb-seed $(seed) --perturb-amplitude 0.01 $(extra) --output-dir results/$(outdir)/$(data)_s$(seed)"
+output         = ./condor_logs/ensfix_$(Cluster)_$(outdir)_$(data)_s$(seed).out
+error          = ./condor_logs/ensfix_$(Cluster)_$(outdir)_$(data)_s$(seed).err
+log            = ./condor_logs/ensfix_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 24576
+request_gpus   = 1
+queue data,seed,outdir,extra from (
+  dns_khi, 0, ensemble_p1e-2_fix,
+  dns_khi, 1, ensemble_p1e-2_fix,
+  dns_khi, 2, ensemble_p1e-2_fix,
+  dns_khi, 3, ensemble_p1e-2_fix,
+  dns_khi_s1, 0, ensemble_p1e-2_fix,
+  dns_khi_s1, 1, ensemble_p1e-2_fix,
+  dns_khi_s1, 2, ensemble_p1e-2_fix,
+  dns_khi_s1, 3, ensemble_p1e-2_fix,
+  dns_khi, 2, ensemble_p1e-2_repro, --hybrid-no-clip
+)

@@ -1014,6 +1014,7 @@ def evaluate_rollout(
     learned_coeff: tuple[str, ...] = (),
     learned_gain: float = 1.0,
     hybrid_coeff: str | None = None,
+    hybrid_clip: bool = True,
     band_windows: list[tuple[float, float]] | None = None,
     band_skip: float = 0.5,
     perturb_seed: int = 0,
@@ -1438,7 +1439,7 @@ def evaluate_rollout(
                 backscatter_clip=backscatter_clip,
                 backscatter_fraction=backscatter_fraction,
                 tau_smooth_passes=tau_smooth_passes,
-            ), closure)
+            ), closure, clip_mode="frobenius" if hybrid_clip else None)
 
         solver_l = RHDSolver(
             Nc_y, Nc_x, cfl=cfl, reconstruction=reconstruction,
@@ -1911,6 +1912,9 @@ if __name__ == "__main__":
     parser.add_argument("--with-hybrid", dest="hybrid_coeff", default=None, metavar="CKPT",
                         help="Add a hybrid run: the TBNN's (--checkpoint) tensor shape "
                              "scaled cell by cell to the energy of this MiNNit checkpoint.")
+    parser.add_argument("--hybrid-no-clip", dest="hybrid_clip", action="store_false",
+                        help="Disable the realizability clip after the hybrid's rescale "
+                             "(the pre-fix behaviour; it diverged in 1 of 14 rollouts).")
     parser.add_argument("--learned-gain", type=float, default=1.0,
                         help="Multiply the learned e_KH by this factor. The a-priori "
                              "optimum is ~0.96, so this is not calibration: it "
@@ -1982,6 +1986,7 @@ if __name__ == "__main__":
         learned_coeff=tuple(args.learned_coeff or ()),
         learned_gain=args.learned_gain,
         hybrid_coeff=args.hybrid_coeff,
+        hybrid_clip=args.hybrid_clip,
         band_windows=[tuple(float(x) for x in w.split(":")) for w in args.band_windows]
         if args.band_windows else None,
         band_skip=args.band_skip,

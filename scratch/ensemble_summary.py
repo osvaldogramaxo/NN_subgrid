@@ -25,8 +25,18 @@ import sys
 import numpy as np
 
 root = sys.argv[1] if len(sys.argv) > 1 else "results/ensemble"
-NAMES = {"unclosed": "unclosed", "TBNN": "TBNN", "learned-coeff (residual)": "MiNNit",
+NAMES = {"unclosed": "unclosed", "TBNN": "TBNN", "learned-coeff": "MiNNit",
          "hybrid (TBNN shape x MiNNit amp)": "hybrid", "exact DNS": "oracle"}
+
+
+def canon(members):
+    """The MiNNit row is labelled by its checkpoint ("learned-coeff (residual)" at r=16,
+    "learned-coeff (r32)" from the filter scan); fold any of them into one key."""
+    for rows in members.values():
+        for w in rows.values():
+            for k in [k for k in w if k.startswith("learned-coeff (")]:
+                w["learned-coeff"] = w.pop(k)
+    return members
 
 members = {}
 for f in sorted(glob.glob(os.path.join(root, "*", "metrics.json"))):
@@ -36,6 +46,7 @@ for f in sorted(glob.glob(os.path.join(root, "*", "metrics.json"))):
         members[tag] = w
 if not members:
     sys.exit(f"no windowed metrics under {root}")
+members = canon(members)
 
 windows = list(next(iter(members.values())).keys())
 # Folder names are <data>_s<seed>, and "dns_khi_s1" is dns_khi seed 1 -- not the

@@ -712,3 +712,45 @@ decimals; a node-level floating-point difference is the likely reason). The fix 
 supported by the mechanism, not by a reproduced failure. The long-rollout ranking is
 unchanged: hybrid spectral distance 0.618 ± 0.008; MiNNit still closer to the DNS than the
 hybrid in 8/8 paired members (+0.023 ± 0.004), hybrid and TBNN still tied (+0.006 ± 0.009).
+
+
+---
+
+## 21. Larger filters: at r = 64 the sub-grid term matters and the hybrid wins (2026-10-19)
+
+`condor_ensemble_rscan.sub`: the 1% ensemble (2 DNS × 4 members, every closure) at
+$r = 32$ and 64, each with the models trained for that filter on `dns_khi`.
+
+*Metric fix first:* at $r=64$ the coarse step is ~0.035, so frames are saved up to 0.035 after
+their 0.1 mark, beyond the 0.025 alignment tolerance — most $r=64$ frames were silently dropped
+and the first aggregation was garbage. The tolerance is now half the snapshot spacing (still
+rejects a skipped save); `scratch/recompute_windowed.py` recomputed every member (all frames
+valid). The $r=64$ result was then reproduced exactly by an independent per-frame computation.
+
+**Whole window $t = 1.5$–10, log-spectral distance to the DNS (pooled, 8 members):**
+
+| run | r = 16 | r = 32 | r = 64 | KE at r = 64 |
+|---|---|---|---|---|
+| oracle | 0.581 | 0.469 | **0.414** | 1.05 |
+| unclosed | 0.584 | 0.478 | 0.923 | 1.27 |
+| TBNN | 0.613 | 0.480 | 0.796 | 1.26 |
+| MiNNit | 0.599 | 0.493 | 0.547 | 1.15 |
+| hybrid | 0.618 | 0.507 | **0.478** | 1.12 |
+
+1. **The answer to "does the sub-grid term matter more at larger filters" is yes, sharply.**
+   The exact stress barely helps at $r = 16$ and 32 but halves the spectral distance at
+   $r = 64$; without a closure the solver piles up 27% too much kinetic energy.
+2. **At $r = 64$ the closures separate cleanly:** hybrid < MiNNit < TBNN ≈ unclosed. Paired,
+   the hybrid beats MiNNit in 8/8 members (−0.069 ± 0.006) and the TBNN in 8/8 (−0.32 ± 0.07).
+   In the middle and late windows the hybrid is even closer to the DNS than the exact stress.
+3. **The a-priori ranking predicts the rollout ranking where the closure matters.** Hybrid a-priori
+   at $r=64$: Eq. 25 0.549, corr 0.838 (TBNN 0.719 / 0.821, MiNNit 0.778 / 0.633). The TBNN's
+   failure follows its amplitude (0.75 a-priori): it barely drains the energy pile-up (KE 1.26).
+4. **$r = 32$ is a crossover:** the oracle only just beats no closure (0.469 vs 0.478), the TBNN
+   ties no closure, and the hybrid is last (+0.026 ± 0.013 vs TBNN) — differences of the same
+   size as at $r=16$.
+
+This supersedes the reading of §18–19 that "a-priori scores do not predict long rollouts": they
+do not where the sub-grid term is too small to move a rollout ($r \le 32$ here), and they do
+where it is not ($r = 64$). Caveat: $r=64$ is the edge of the usable filter range (16² grid,
+one or two shells per spectral band), and it is still two DNS realisations.

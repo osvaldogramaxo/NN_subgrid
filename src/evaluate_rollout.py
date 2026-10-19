@@ -1763,7 +1763,12 @@ def evaluate_rollout(
         # Nearest real snapshot per frame -- not history_dns, which blends two.
         nearest = np.abs(times[:, None] - snap_times[None, :]).argmin(axis=1)
         spacing = float(np.median(np.diff(snap_times))) if len(snap_times) > 1 else 1.0
-        valid = np.abs(times - snap_times[nearest]) <= 0.25 * spacing
+        # Frames are saved at the first solver step past each save mark, so they sit up
+        # to one coarse dt after it -- 0.007 at r=16 but 0.035 at r=64. Half the snapshot
+        # spacing keeps the nearest snapshot unique and still rejects a skipped save
+        # (~1 spacing off); a quarter silently dropped most r=64 frames.
+        tol = 0.5 * spacing
+        valid = np.abs(times - snap_times[nearest]) <= tol
         history_ref = {
             "t": times,
             **{q: torch.stack([dns_cache[j][src] for j in nearest])
@@ -1771,7 +1776,7 @@ def evaluate_rollout(
         }
         base = "exact DNS" if history_exact is not None else None
         wres = windowed_band_ratios(history_ref, runs_w, valid, windows,
-                                    baseline=base, t_tol=0.25 * spacing)
+                                    baseline=base, t_tol=tol)
         results["windowed_band_ratios"] = wres
         print(f"\n=== Band ratios per window: geometric mean over frames vs the nearest DNS "
               f"snapshot (first {band_skip:g} skipped) ===")

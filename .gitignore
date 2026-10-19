@@ -56,3 +56,4 @@ scratch/*
 !scratch/gpu_conv_bench.py
 !scratch/ensemble_summary.py
 !scratch/hybrid_divergence_probe.py
+!scratch/recompute_windowed.py

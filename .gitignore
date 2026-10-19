@@ -18,6 +18,7 @@ wheels/
 test1/
 dns_khi/
 dns_khi_s1/
+dns2k_*/
 *.zip
 *.h5
 

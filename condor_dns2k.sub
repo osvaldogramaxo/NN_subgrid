@@ -1,0 +1,19 @@
+# ==============================================================================
+# condor_dns2k.sub -- 2048^2 KHI DNS realisations, seeds 0-5.
+# Same physical setup as dns_khi / dns_khi_s1 (1024^2). The seed only sets the phases
+# of an analytic, grid-independent perturbation, so seed 0 and 1 are the existing two
+# realisations at double resolution (a convergence check); 2-5 are new.
+# Measured on a V100: ~670 s per simulated time unit, 2.6 GiB GPU memory,
+# ~160 MB per snapshot (~32 GB per run). No resume support: an evicted job restarts.
+# ==============================================================================
+universe       = vanilla
+executable     = ./.venv/bin/python
+arguments      = "-u -m src.generate_dns --config crmhd.toml --nx 2048 --ny 2048 --v-shear 0.4 --thickness 0.01 --seed-kmin 4 --seed-kmax 16 --seed-amplitude 0.02 --t-final 20 --n-outputs 200 --report-r 32 --seed $(seed) --output-dir dns2k_s$(seed)"
+output         = ./condor_logs/dns2k_$(Cluster)_s$(seed).out
+error          = ./condor_logs/dns2k_$(Cluster)_s$(seed).err
+log            = ./condor_logs/dns2k_$(Cluster).log
+getenv         = True
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+queue seed in (0, 1, 2, 3, 4, 5)

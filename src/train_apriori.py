@@ -112,7 +112,7 @@ class TBNNDataset(torch.utils.data.Dataset):
         dtype: torch.dtype = torch.float64,
     ):
         from src.dataset import (
-            load_all_snapshots, relativistic_favre_filter, compute_sgs_stress,
+            read_snapshot, snapshot_files, relativistic_favre_filter, compute_sgs_stress,
         )
 
         self.dtype = dtype
@@ -142,18 +142,13 @@ class TBNNDataset(torch.utils.data.Dataset):
             else:
                 print(f"  Cache v{cached.get('cache_version', 1)} outdated (need v{CACHE_VERSION}). Regenerating...")
 
-        snapshots = load_all_snapshots(data_dir)
-        if time_range is not None:
-            t_min, t_max = time_range
-            snapshots = [s for s in snapshots if t_min <= s["t"] <= t_max]
-
-        if stride > 1:
-            snapshots = snapshots[::stride]
-
-        if not snapshots:
+        # One snapshot in memory at a time: a 2048^2 run is ~27 GB of primitives.
+        files = snapshot_files(data_dir, time_range, stride)
+        if not files:
             raise ValueError(f"No snapshots in time range {time_range}")
+        snapshots = (read_snapshot(f) for f in files)
 
-        print(f"  Processing {len(snapshots)} snapshots (stride={stride})...")
+        print(f"  Processing {len(files)} snapshots (stride={stride})...")
 
         all_inv = []
         all_thermo = []

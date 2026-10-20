@@ -51,9 +51,13 @@ members = canon(members)
 windows = list(next(iter(members.values())).keys())
 # Folder names are <data>_s<seed>, and "dns_khi_s1" is dns_khi seed 1 -- not the
 # unseen run, whose members are dns_khi_s1_s<seed>. Parse rather than prefix-match.
-parsed = {m: re.fullmatch(r"(dns_khi(?:_s1)?)_s(\d+)", m) for m in members}
-groups = {"dns_khi": [m for m, p in parsed.items() if p and p.group(1) == "dns_khi"],
-          "dns_khi_s1 (unseen)": [m for m, p in parsed.items() if p and p.group(1) == "dns_khi_s1"]}
+# The greedy prefix takes everything up to the LAST "_s<digits>": dns_khi_s1 -> dns_khi
+# member 1, dns_khi_s1_s0 -> dns_khi_s1 member 0, dns2k_s3_s1 -> dns2k_s3 member 1.
+parsed = {m: re.fullmatch(r"(.+)_s(\d+)", m) for m in members}
+groups = {}
+for m, p in sorted(parsed.items()):
+    if p:
+        groups.setdefault(p.group(1), []).append(m)
 groups["pooled"] = list(members)
 print(f"{len(members)} members: {', '.join(members)}")
 

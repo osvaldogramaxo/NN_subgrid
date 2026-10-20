@@ -754,3 +754,33 @@ This supersedes the reading of §18–19 that "a-priori scores do not predict lo
 do not where the sub-grid term is too small to move a rollout ($r \le 32$ here), and they do
 where it is not ($r = 64$). Caveat: $r=64$ is the edge of the usable filter range (16² grid,
 one or two shells per spectral band), and it is still two DNS realisations.
+
+
+---
+
+## 22. Replication at 2048², r = 128, on five unseen realisations (2026-10-20)
+
+Six new 2048² DNS (`condor_dns2k.sub`, seeds 0–5, same setup as `dns_khi`; ~6 h and 57 GB each).
+The seed sets only the phases of an analytic perturbation, so seeds 0/1 are the 1024²
+realisations at double resolution: filtered to 16², the two resolutions agree exactly to
+$t \approx 5$, then decorrelate (density correlation 0.25–0.90 by $t=20$) while kinetic energy
+and sub-grid energy fraction stay within a few percent — the 1024² data is converged at these
+scales. TBNN and MiNNit retrained at $r=128$ (same filter width as $r=64$ at 1024²) on
+`dns2k_s0`; everything below is on seeds 1–5, unseen by every model.
+
+**A-priori** (mean ± s.e. over the 5 realisations): hybrid corr 0.861 ± 0.008, Eq. 25
+**0.491 ± 0.015**; TBNN 0.817 / 0.748; MiNNit 0.656 / 0.754. Hybrid best on Eq. 25 in 5/5.
+
+**Rollouts**, 1% ensemble, 5 realisations × 2 members, $t=1.5$–10, log-spectral distance /
+total KE: oracle 0.428 / 1.04; **hybrid 0.525 / 1.10**; MiNNit 0.556 / 1.12; TBNN 0.844 / 1.24;
+unclosed 0.917 / 1.24. Paired: hybrid closer to the DNS than MiNNit in 9/10 members
+(−0.031 ± 0.007) and than the TBNN in 10/10 (−0.32 ± 0.07). No divergences.
+
+**§21 replicates:** where the sub-grid term matters, the closures rank as they do a priori —
+hybrid, then MiNNit, then the TBNN, which barely improves on no closure because its amplitude
+is too low (0.72) to drain the energy pile-up. The hybrid's lead over MiNNit comes from the
+early and middle windows; late ($t > 7.2$) the two are level (+0.023 ± 0.012).
+
+Infrastructure: the TBNN dataset build and `evaluate_rollout` now read snapshots one at a time /
+only inside the time window (`dataset.snapshot_files`); a 2048² run would otherwise need ~27 GB
+just to build the training set.

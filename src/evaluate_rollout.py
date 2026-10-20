@@ -37,7 +37,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils import CRMHD_TBNN
 from src.dataset import (
-    read_snapshot, relativistic_favre_filter, GAMMA_EOS, compute_sgs_stress,
+    read_snapshot, snapshot_files, relativistic_favre_filter, GAMMA_EOS, compute_sgs_stress,
     compute_sgs_stress_on_faces,
 )
 from src.config import add_config_arguments, apply_config_defaults, configure
@@ -1098,15 +1098,14 @@ def evaluate_rollout(
             diverged_at[key] = float(solver.t)
             return False
 
-    # Load all snapshots and identify start/end
-    files = sorted(glob.glob(os.path.join(data_dir, "h*.h5")))
+    # Load the snapshots in the window. Times are read from the file headers first,
+    # so files outside it are never loaded (a 2048^2 run is ~57 GB on disk).
+    files = snapshot_files(data_dir, (t_start - 0.1, t_end + 0.1))
     snapshots = []
-    pbar_snaps = tqdm(files, desc="Scanning DNS snapshots", unit="snap", dynamic_ncols=True, file=sys.stdout)
+    pbar_snaps = tqdm(files, desc="Loading DNS snapshots", unit="snap", dynamic_ncols=True, file=sys.stdout)
     for f in pbar_snaps:
-        snap = read_snapshot(f)
-        if t_start - 0.1 <= snap["t"] <= t_end + 0.1:
-            snapshots.append(snap)
-            pbar_snaps.set_postfix(matched=len(snapshots), t=f"{snap['t']:.2f}")
+        snapshots.append(read_snapshot(f))
+        pbar_snaps.set_postfix(t=f"{snapshots[-1]['t']:.2f}")
 
     if len(snapshots) < 2:
         raise ValueError(f"Need at least 2 snapshots in [{t_start}, {t_end}]")

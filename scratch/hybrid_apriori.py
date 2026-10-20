@@ -1,6 +1,7 @@
 """A-priori: TBNN vs MiNNit vs hybrid (TBNN shape x MiNNit amplitude) on the
 unseen dns_khi_s1 run, every model run through its actual solver closure.
-Usage: python scratch/hybrid_apriori.py [r]
+Usage: python scratch/hybrid_apriori.py [r] [data_dir] [tbnn_ckpt] [minnit_ckpt]
+(defaults: 16, dns_khi_s1, checkpoints_r{r}/best_model.pt, the r's MiNNit checkpoint)
 """
 import glob
 import sys
@@ -17,12 +18,15 @@ from src.train_minit_coeff import score_tau  # noqa: E402
 from utils import CRMHD_TBNN  # noqa: E402
 
 r = int(sys.argv[1]) if len(sys.argv) > 1 else 16
+data_dir = sys.argv[2] if len(sys.argv) > 2 else "dns_khi_s1"
 DT = torch.float64
-ckpt_l = "results/minit/minit_coeff_residual.pt" if r == 16 else f"results/filter_scan/minit_coeff_r{r}.pt"
-model, ck = CRMHD_TBNN.from_checkpoint(f"checkpoints_r{r}/best_model.pt", device="cpu", dtype=DT)
+ckpt_t = sys.argv[3] if len(sys.argv) > 3 else f"checkpoints_r{r}/best_model.pt"
+ckpt_l = sys.argv[4] if len(sys.argv) > 4 else (
+    "results/minit/minit_coeff_residual.pt" if r == 16 else f"results/filter_scan/minit_coeff_r{r}.pt")
+model, ck = CRMHD_TBNN.from_checkpoint(ckpt_t, device="cpu", dtype=DT)
 model.eval()
 
-files = sorted(glob.glob("dns_khi_s1/h*.h5"))
+files = sorted(glob.glob(f"{data_dir}/h*.h5"))
 snaps = [s for s in (read_snapshot(f) for f in files[::10]) if s["t"] >= 1.0 - 1e-9]
 taus = {"TBNN": [], "MiNNit": [], "hybrid": []}
 exact, S_all, fb = [], [], []
@@ -50,7 +54,7 @@ for snap in snaps:
 d = {"tau": torch.stack(exact), "S": torch.stack(S_all)}
 d["e_dns"] = 0.5 * (d["tau"][..., 0] + d["tau"][..., 1])
 k_hi = Nx // 4
-print(f"r={r}, {len(snaps)} snapshots of dns_khi_s1, hybrid fallback cells "
+print(f"r={r}, {len(snaps)} snapshots of {data_dir}, hybrid fallback cells "
       f"{100 * sum(fb) / len(fb):.1f}%")
 print(f"{'model':<8} {'amp':>6} {'corr':>7} {'Eq25':>7} {'Pi/Pi_ex':>9} {'hi-k':>6} "
       f"{'hi-k ex':>8}  amp 1st->2nd")

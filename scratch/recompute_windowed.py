@@ -23,7 +23,7 @@ cache: dict = {}
 for root in sys.argv[1:]:
     for d in sorted(glob.glob(os.path.join(root, "*"))):
         tr = torch.load(os.path.join(d, "rollout_trajectory.pt"), weights_only=False)
-        data = re.fullmatch(r"(dns_khi(?:_s1)?)_s\d+", os.path.basename(d)).group(1)
+        data = re.fullmatch(r"(.+)_s\d+", os.path.basename(d)).group(1)
         r = tr["grid"]["r"]
         runs = {n: h for n, h in (("unclosed", tr["unclosed"]), ("TBNN", tr["tbnn"]),
                                   ("exact DNS", tr["exact"])) if h is not None}

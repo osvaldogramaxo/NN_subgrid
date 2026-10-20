@@ -103,6 +103,32 @@ def read_snapshot(filepath: str | Path) -> dict[str, np.ndarray]:
     return {"rho": rho, "vx": vx, "vy": vy, "p": p, "t": t}
 
 
+def snapshot_files(
+    data_dir: str | Path,
+    time_range: tuple[float, float] | None = None,
+    stride: int = 1,
+) -> list[str]:
+    """Snapshot paths in time order, filtered by ``time_range`` then strided.
+
+    Reads only each file's time, so a caller can then load one snapshot at a time:
+    a 2048^2 run is ~27 GB of float64 primitives, which ``load_all_snapshots`` would
+    hold in memory all at once.
+    """
+    files = sorted(glob.glob(os.path.join(data_dir, "h*.h5")))
+    if not files:
+        raise FileNotFoundError(f"No HDF5 files found in {data_dir}")
+    if time_range is not None:
+        t_min, t_max = time_range
+        keep = []
+        for f in files:
+            with h5py.File(f, "r") as h:
+                t = float(h["Parameters"]["t"][()][0])
+            if t_min <= t <= t_max:
+                keep.append(f)
+        files = keep
+    return files[::stride] if stride > 1 else files
+
+
 def load_all_snapshots(data_dir: str | Path) -> list[dict[str, np.ndarray]]:
     """Load all HDF5 snapshots from a directory, sorted by filename (time)."""
     pattern = os.path.join(data_dir, "h*.h5")

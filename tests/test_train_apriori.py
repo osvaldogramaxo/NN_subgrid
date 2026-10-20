@@ -521,3 +521,20 @@ class TestPerSnapshotFloorGuard:
         guarded = raw.clamp(min=0.05 * 1.2e-3)   # guard is 6e-5, well below 3e-4
         assert float(guarded[0]) == pytest.approx(3e-4)
         assert float(guarded[0]) < float(guarded[1]) / 4
+
+
+def test_snapshot_files_filters_by_time_then_strides(tmp_path):
+    """The TBNN dataset now streams snapshots; the file list must match the old
+    filter-then-stride semantics without loading any field data."""
+    import h5py
+    import numpy as np
+
+    from src.dataset import snapshot_files
+
+    for i, t in enumerate(np.round(np.arange(0.0, 2.01, 0.25), 10)):
+        with h5py.File(tmp_path / f"h{i:08d}.h5", "w") as f:
+            f.create_group("Parameters").create_dataset("t", data=np.array([t]))
+    names = lambda fs: [p.split("/")[-1] for p in fs]
+    assert len(snapshot_files(tmp_path)) == 9
+    assert names(snapshot_files(tmp_path, (0.5, 1.5))) == [f"h{i:08d}.h5" for i in (2, 3, 4, 5, 6)]
+    assert names(snapshot_files(tmp_path, (0.5, 1.5), stride=2)) == [f"h{i:08d}.h5" for i in (2, 4, 6)]

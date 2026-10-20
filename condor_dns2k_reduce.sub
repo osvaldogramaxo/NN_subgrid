@@ -1,0 +1,15 @@
+# 2048^2 study at r = 128 (same filter width as r = 64 at 1024^2). FEASIBILITY §22.
+# Reduce each run for MiNNit and a-priori scoring (CPU).
+universe       = vanilla
+getenv         = True
+
+executable     = ./run_reduce.sh
+arguments      = "dns2k_s$(seed) 128 results/dns2k/reduction_r128_s$(seed).pt"
+output         = ./condor_logs/red2k_$(Cluster)_s$(seed).out
+error          = ./condor_logs/red2k_$(Cluster)_s$(seed).err
+log            = ./condor_logs/red2k_$(Cluster).log
+request_cpus   = 8
+request_memory = 16384
+# No request_gpus line: the pool sends jobs with RequestGpus *undefined* to CPU slots
+# (SlotID 2); any defined value, 0 included, must equal 1 and goes to a GPU slot.
+queue seed in (0, 1, 2, 3, 4, 5)

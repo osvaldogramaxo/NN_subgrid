@@ -1,0 +1,15 @@
+# 2048^2 study at r = 128 (same filter width as r = 64 at 1024^2). FEASIBILITY §22.
+# TBNN trained on dns2k_s0, all of t = 1..20.
+universe       = vanilla
+getenv         = True
+
+executable     = ./run_train.sh
+arguments      = "dns2k_s0 128 1 2500 2 1e-3 cuda 10 200 --time-range 1.0 20.0 --test-time 0 0 --tensor-floor-scope snapshot"
+environment    = "CHECKPOINT_DIR=checkpoints_2k_r128"
+output         = ./condor_logs/train2k_$(Cluster).out
+error          = ./condor_logs/train2k_$(Cluster).err
+log            = ./condor_logs/train2k_$(Cluster).log
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+queue 1

@@ -58,3 +58,4 @@ scratch/*
 !scratch/ensemble_summary.py
 !scratch/hybrid_divergence_probe.py
 !scratch/recompute_windowed.py
+!scratch/reduce_dns_cache.py

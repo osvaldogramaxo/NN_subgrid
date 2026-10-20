@@ -729,12 +729,14 @@ valid). The $r=64$ result was then reproduced exactly by an independent per-fram
 
 **Whole window $t = 1.5$–10, log-spectral distance to the DNS (pooled, 8 members):**
 
+*(r = 16 column corrected 2026-10-20: it had mixed in the 1e-3 ensemble; all columns are now the 1% ensembles.)*
+
 | run | r = 16 | r = 32 | r = 64 | KE at r = 64 |
 |---|---|---|---|---|
-| oracle | 0.581 | 0.469 | **0.414** | 1.05 |
-| unclosed | 0.584 | 0.478 | 0.923 | 1.27 |
-| TBNN | 0.613 | 0.480 | 0.796 | 1.26 |
-| MiNNit | 0.599 | 0.493 | 0.547 | 1.15 |
+| oracle | 0.577 | 0.469 | **0.414** | 1.05 |
+| unclosed | 0.581 | 0.478 | 0.923 | 1.27 |
+| TBNN | 0.612 | 0.480 | 0.796 | 1.26 |
+| MiNNit | 0.595 | 0.493 | 0.547 | 1.15 |
 | hybrid | 0.618 | 0.507 | **0.478** | 1.12 |
 
 1. **The answer to "does the sub-grid term matter more at larger filters" is yes, sharply.**
@@ -743,16 +745,19 @@ valid). The $r=64$ result was then reproduced exactly by an independent per-fram
 2. **At $r = 64$ the closures separate cleanly:** hybrid < MiNNit < TBNN ≈ unclosed. Paired,
    the hybrid beats MiNNit in 8/8 members (−0.069 ± 0.006) and the TBNN in 8/8 (−0.32 ± 0.07).
    In the middle and late windows the hybrid is even closer to the DNS than the exact stress.
-3. **The a-priori ranking predicts the rollout ranking where the closure matters.** Hybrid a-priori
-   at $r=64$: Eq. 25 0.549, corr 0.838 (TBNN 0.719 / 0.821, MiNNit 0.778 / 0.633). The TBNN's
-   failure follows its amplitude (0.75 a-priori): it barely drains the energy pile-up (KE 1.26).
+3. **Only the hybrid's first place carries over from a priori.** Hybrid a-priori at $r=64$:
+   Eq. 25 0.549, corr 0.838; TBNN 0.719 / 0.821; MiNNit 0.778 / 0.633 — so a priori the order
+   is hybrid, TBNN, MiNNit, but in simulation it is hybrid, MiNNit, TBNN. *(Corrected
+   2026-10-20; this point first claimed the whole ranking carried over.)* The simulation order
+   follows amplitude: the TBNN (0.75 a-priori) barely drains the energy pile-up (KE 1.26).
 4. **$r = 32$ is a crossover:** the oracle only just beats no closure (0.469 vs 0.478), the TBNN
    ties no closure, and the hybrid is last (+0.026 ± 0.013 vs TBNN) — differences of the same
    size as at $r=16$.
 
-This supersedes the reading of §18–19 that "a-priori scores do not predict long rollouts": they
-do not where the sub-grid term is too small to move a rollout ($r \le 32$ here), and they do
-where it is not ($r = 64$). Caveat: $r=64$ is the edge of the usable filter range (16² grid,
+This refines the reading of §18–19 that "a-priori scores do not predict long rollouts": where the
+sub-grid term is too small to move a rollout ($r \le 32$ here) nothing ranks closures; where it is
+not ($r = 64$), the a-priori winner also wins in simulation, but correlation and Eq. 25 do not
+order the rest — amplitude does. Caveat: $r=64$ is the edge of the usable filter range (16² grid,
 one or two shells per spectral band), and it is still two DNS realisations.
 
 
@@ -776,9 +781,10 @@ total KE: oracle 0.428 / 1.04; **hybrid 0.525 / 1.10**; MiNNit 0.556 / 1.12; TBN
 unclosed 0.917 / 1.24. Paired: hybrid closer to the DNS than MiNNit in 9/10 members
 (−0.031 ± 0.007) and than the TBNN in 10/10 (−0.32 ± 0.07). No divergences.
 
-**§21 replicates:** where the sub-grid term matters, the closures rank as they do a priori —
-hybrid, then MiNNit, then the TBNN, which barely improves on no closure because its amplitude
-is too low (0.72) to drain the energy pile-up. The hybrid's lead over MiNNit comes from the
+**§21 replicates:** where the sub-grid term matters, the hybrid — best a priori — is best in
+simulation, then MiNNit, then the TBNN, which barely improves on no closure because its
+amplitude is too low (0.72) to drain the energy pile-up. A priori the TBNN beats MiNNit on
+correlation and Eq. 25, so the MiNNit/TBNN order follows amplitude, not those scores. The hybrid's lead over MiNNit comes from the
 early and middle windows; late ($t > 7.2$) the two are level (+0.023 ± 0.012).
 
 Infrastructure: the TBNN dataset build and `evaluate_rollout` now read snapshots one at a time /

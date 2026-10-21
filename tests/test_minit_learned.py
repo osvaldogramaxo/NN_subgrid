@@ -605,3 +605,39 @@ class TestHybridClip:
         tau, _ = h(p)
         assert (torch.norm(tau, dim=(-2, -1)) > 0.5 * p[..., 3]).any()
         assert h.max_scale > 100
+
+
+class TestHybridAblations:
+    """Shape/energy ablations swap one factor of the hybrid for another closure's."""
+
+    def test_energy_closure_sets_the_energy_and_the_fallback(self):
+        from src.minit_learned import HybridClosure
+
+        p = _prims()
+        learned = LearnedMInITClosure(_net(), _cfg(), 1 / 16, 1 / 16)
+        tau_src, _ = LearnedMInITClosure(_net(seed=5), _cfg(), 1 / 16, 1 / 16)(p)
+        tau_src = tau_src * 3.0
+        shape = learned                           # any closure works as the shape
+
+        class Src:
+            def __call__(self, prims):
+                return tau_src, torch.ones(prims.shape[:-1], dtype=DT)
+
+        h = HybridClosure(shape, learned, clip_mode=None, energy_closure=Src())
+        tau, _ = h(p)
+        e = 0.5 * (tau[..., 1, 1] + tau[..., 2, 2])
+        e_src = 0.5 * (tau_src[..., 1, 1] + tau_src[..., 2, 2])
+        assert torch.allclose(e, e_src.clamp(min=0.0))
+
+    def test_set_time_reaches_every_wrapped_closure(self):
+        from src.minit_learned import HybridClosure
+
+        seen = []
+
+        class Timed:
+            def set_time(self, t):
+                seen.append(t)
+
+        learned = LearnedMInITClosure(_net(), _cfg(), 1 / 16, 1 / 16)
+        HybridClosure(Timed(), learned, energy_closure=Timed()).set_time(3.5)
+        assert seen == [3.5, 3.5]

@@ -59,3 +59,4 @@ scratch/*
 !scratch/hybrid_divergence_probe.py
 !scratch/recompute_windowed.py
 !scratch/reduce_dns_cache.py
+!scratch/minit_fair_compare.py

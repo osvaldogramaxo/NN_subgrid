@@ -92,6 +92,8 @@ from src.minit import (
     LAMBDA_OVER_DELTA,
     MInITCoefficients,
     advance_e_kh,
+    growth_rate,
+    row_mean,
     saturation_energy,
     subgrid_energy_from_stress,
 )
@@ -724,6 +726,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--normalize-beta", action="store_true",
                     help="rescale the diagonal so beta_xx + beta_yy = 2 exactly")
     ap.add_argument("--shear-mode", choices=["dvxdy", "strain"], default="dvxdy")
+    ap.add_argument("--average", choices=["cell", "x"], default="cell",
+                    help="'cell': Eq. 12 cell by cell with each cell's own |d(vx)/dy|. "
+                         "'x': MInIT's mean-field form, as in the paper -- the growth "
+                         "rate of the x-averaged shear profile, and e_KH, rho and the "
+                         "exact stress all averaged over x before fitting and scoring.")
     ap.add_argument("--substeps", type=int, default=10)
     ap.add_argument("--A-range", type=float, nargs=2, default=(0.01, 2.0),
                     metavar=("LO", "HI"), help="search range for A_gamma")
@@ -778,6 +785,19 @@ def main(argv: list[str] | None = None) -> int:
     e_dns = sel["e_dns"]
     tau_exact = sel["tau"]
     shear = sel["strain"] if args.shear_mode == "strain" else sel["shear"]
+
+    if args.average == "x":
+        if args.shear_mode != "dvxdy":
+            raise ValueError("--average x uses the paper's d<vx>_x/dy; use --shear-mode dvxdy")
+        # Paper Sec. 4.3.1: gamma from the mean shear, averaged over the homogeneous
+        # plane; the DNS quantities it is calibrated against are averages too.
+        Ny_, Nx_ = e_dns.shape[-2:]
+        shear = growth_rate(row_mean(sel["vx"]), row_mean(sel["vy"]), 1.0 / Nx_, 1.0 / Ny_, 1.0)
+        sel["rho"] = row_mean(sel["rho"])
+        e_dns = row_mean(e_dns)
+        tau_exact = tau_exact.mean(dim=-2, keepdim=True).expand_as(tau_exact)
+        print("Mean-field (x-averaged) MInIT: gamma from d<vx>_x/dy; e_KH, rho and the "
+              "exact stress averaged over x")
 
     Nc_y, Nc_x = e_dns.shape[-2:]
     delta_f = 1.0 / Nc_x

@@ -179,6 +179,17 @@ class MInITCoefficients:
 # Model pieces, as free functions so the a-priori fit can reuse them
 # ---------------------------------------------------------------------------
 
+def row_mean(field: torch.Tensor) -> torch.Tensor:
+    """Average over x (the last axis), broadcast back to the field's shape.
+
+    The KHI box is statistically homogeneous in x, so the x-average is MInIT's
+    mean-field average in 2D: the paper averages the growth rate over the xz plane
+    of its 3D boxes (Sec. 4.3.1, Eq. 23) and drops advection because that average
+    cancels it. Here <v_y>_x ~ 0, so the same argument holds.
+    """
+    return field.mean(dim=-1, keepdim=True).expand_as(field)
+
+
 def growth_rate(
     vx: torch.Tensor,
     vy: torch.Tensor,
@@ -440,7 +451,14 @@ class MInITClosure:
         backscatter_clip: str | None = None,
         backscatter_fraction: float = 0.0,
         tau_smooth_passes: int = 0,
+        average: str = "cell",
     ):
+        if average not in ("cell", "x"):
+            raise ValueError(f"unknown average {average!r}; use 'cell' or 'x'")
+        if average == "x" and advect:
+            raise ValueError("average='x' is the plane-averaged model; advection cancels "
+                             "in it (<v_y>_x ~ 0), so advect must be False")
+        self.average = average
         self.dx = dx
         self.dy = dy
         self.delta_f = float(delta_f if delta_f is not None else dx)
@@ -464,6 +482,18 @@ class MInITClosure:
         self.history: list[tuple[float, float, float]] = []
 
     # ------------------------------------------------------------------
+    def _model_prims(self, prims: torch.Tensor) -> torch.Tensor:
+        """The state the energy equation sees.
+
+        ``average="cell"``: each coarse cell's own state, so gamma_KH comes from the
+        local |d(vx)/dy| -- Eq. 23 applied pointwise. ``average="x"``: row averages,
+        so gamma_KH = A_gamma |d<vx>_x/dy| is the growth rate of the *mean* shear
+        profile, as in the paper, and gamma, rho and e_KH are uniform along x.
+        """
+        if self.average == "cell":
+            return prims
+        return torch.stack([row_mean(prims[..., k]) for k in range(prims.shape[-1])], dim=-1)
+
     def initialize(self, prims: torch.Tensor, e_KH: torch.Tensor | None = None) -> None:
         """Set the initial ``e_KH`` field.
 
@@ -478,6 +508,8 @@ class MInITClosure:
         """
         if e_KH is not None:
             self.e_KH = e_KH.to(dtype=prims.dtype, device=prims.device).clamp(min=0.0)
+            if self.average == "x":
+                self.e_KH = row_mean(self.e_KH)
         else:
             self.e_KH = torch.full(
                 prims.shape[:-1], float(self.e_seed),
@@ -488,12 +520,13 @@ class MInITClosure:
             # The fixed point is a function of the state alone, so there is
             # nothing to seed and any passed field would be overwritten on the
             # first advance anyway. Set it now so the first step is consistent.
+            mp = self._model_prims(prims)
             gamma = growth_rate(
-                prims[..., 1], prims[..., 2], self.dx, self.dy,
+                mp[..., 1], mp[..., 2], self.dx, self.dy,
                 self.coeffs.A_gamma, mode=self.shear_mode,
             )
             self.e_KH = saturation_energy(
-                gamma, prims[..., 0], self.lambda_KH, self.coeffs.C,
+                gamma, mp[..., 0], self.lambda_KH, self.coeffs.C,
             )
 
         self._apply_floor(prims)
@@ -501,11 +534,12 @@ class MInITClosure:
     def _apply_floor(self, prims: torch.Tensor) -> None:
         if self.floor_fraction <= 0.0:
             return
+        mp = self._model_prims(prims)
         gamma = growth_rate(
-            prims[..., 1], prims[..., 2], self.dx, self.dy,
+            mp[..., 1], mp[..., 2], self.dx, self.dy,
             self.coeffs.A_gamma, mode=self.shear_mode,
         )
-        e_sat = saturation_energy(gamma, prims[..., 0], self.lambda_KH, self.coeffs.C)
+        e_sat = saturation_energy(gamma, mp[..., 0], self.lambda_KH, self.coeffs.C)
         self.e_KH = torch.maximum(self.e_KH, self.floor_fraction * e_sat)
 
     # ------------------------------------------------------------------
@@ -518,9 +552,10 @@ class MInITClosure:
         if self.e_KH is None:
             self.initialize(prims)
 
-        rho = prims[..., 0]
+        mp = self._model_prims(prims)
+        rho = mp[..., 0]
         gamma = growth_rate(
-            prims[..., 1], prims[..., 2], self.dx, self.dy,
+            mp[..., 1], mp[..., 2], self.dx, self.dy,
             self.coeffs.A_gamma, mode=self.shear_mode,
         )
 

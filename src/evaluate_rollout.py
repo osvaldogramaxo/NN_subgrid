@@ -282,6 +282,8 @@ _MINIT_STYLE = {
     "learned-residual": {"color": "tab:red", "ls": "-"},
     "learned-direct": {"color": "tab:brown", "ls": "--"},
     "hybrid": {"color": "tab:purple", "ls": "-"},
+    "ablation-exactE": {"color": "tab:gray", "ls": ":"},
+    "ablation-exactS": {"color": "tab:olive", "ls": ":"},
 }
 
 # Learned-coefficient runs share the MInIT run/history dicts, so that the
@@ -295,6 +297,10 @@ def _variant_label(variant: str) -> str:
     """Display name for a run stored in the MInIT dicts."""
     if variant == "hybrid":
         return "hybrid (TBNN shape x MiNNit amp)"
+    if variant == "ablation-exactE":
+        return "ablation (TBNN shape x exact energy)"
+    if variant == "ablation-exactS":
+        return "ablation (exact shape x MiNNit energy)"
     if variant.startswith(_LEARNED_PREFIX):
         return f"learned-coeff ({variant[len(_LEARNED_PREFIX):]})"
     return f"MInIT ({variant})"
@@ -304,6 +310,8 @@ def _variant_key(variant: str) -> str:
     """Results-dict key for a run stored in the MInIT dicts."""
     if variant == "hybrid":
         return "hybrid"
+    if variant.startswith("ablation-"):
+        return variant.replace("-", "_")
     if variant.startswith(_LEARNED_PREFIX):
         return f"learned_{variant[len(_LEARNED_PREFIX):]}"
     return f"minit_{variant}"
@@ -1011,10 +1019,12 @@ def evaluate_rollout(
     minit_floor_fraction: float = 0.0,
     minit_advect: bool = False,
     minit_shear_mode: str = "dvxdy",
+    minit_average: str = "cell",
     learned_coeff: tuple[str, ...] = (),
     learned_gain: float = 1.0,
     hybrid_coeff: str | None = None,
     hybrid_clip: bool = True,
+    hybrid_ablations: bool = False,
     band_windows: list[tuple[float, float]] | None = None,
     band_skip: float = 0.5,
     perturb_seed: int = 0,
@@ -1372,6 +1382,7 @@ def evaluate_rollout(
                 dx=dx, dy=dy, delta_f=dx, coeffs=coeffs,
                 shear_mode=minit_shear_mode,
                 mode=mode,
+                average=minit_average,
                 advect=minit_advect,
                 e_seed=minit_e_seed,
                 floor_fraction=minit_floor_fraction,
@@ -1396,13 +1407,17 @@ def evaluate_rollout(
             if save_int is not None:
                 history_minit[variant] = solver_minit.get_history()
 
-    learned_jobs = [(p_, False) for p_ in learned_coeff]
+    learned_jobs = [(p_, "learned") for p_ in learned_coeff]
     if hybrid_coeff:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError("--with-hybrid needs the TBNN --checkpoint for its shape")
-        learned_jobs.append((hybrid_coeff, True))
+        learned_jobs.append((hybrid_coeff, "hybrid"))
+        if hybrid_ablations:
+            # Shape/energy ablations: swap one factor of the hybrid for the exact DNS's.
+            learned_jobs += [(hybrid_coeff, "exactE"), (hybrid_coeff, "exactS")]
 
-    for ckpt_path, is_hybrid in learned_jobs:
+    for ckpt_path, kind in learned_jobs:
+        is_hybrid = kind != "learned"
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(
                 f"learned coefficients {ckpt_path!r} does not exist. Run "
@@ -1411,7 +1426,8 @@ def evaluate_rollout(
         name = Path(ckpt_path).stem.replace("minit_coeff_", "")
         if learned_gain != 1.0:
             name = f"{name}-g{learned_gain:g}"
-        variant = "hybrid" if is_hybrid else f"{_LEARNED_PREFIX}{name}"
+        variant = {"learned": f"{_LEARNED_PREFIX}{name}", "hybrid": "hybrid",
+                   "exactE": "ablation-exactE", "exactS": "ablation-exactS"}[kind]
         key = _variant_key(variant)
         print(f"\n--- Running {_variant_label(variant)} [{name}] ---")
 
@@ -1430,7 +1446,7 @@ def evaluate_rollout(
         diag_closure = closure          # carries e_KH for the diagnostics below
         if is_hybrid:
             # Same TBNN closure as the TBNN row; its energy is replaced by MiNNit's.
-            closure = HybridClosure(TBNNSGSClosure(
+            tbnn_c = TBNNSGSClosure(
                 model,
                 ckpt["inv_mean"].to(device), ckpt["inv_std"].to(device),
                 ckpt["thermo_mean"].to(device), ckpt["thermo_std"].to(device),
@@ -1438,7 +1454,19 @@ def evaluate_rollout(
                 backscatter_clip=backscatter_clip,
                 backscatter_fraction=backscatter_fraction,
                 tau_smooth_passes=tau_smooth_passes,
-            ), closure, clip_mode="frobenius" if hybrid_clip else None)
+            )
+            exact_c = None
+            if kind in ("exactE", "exactS"):
+                exact_c = ExactDNSSGSClosure(
+                    snapshots=snapshots, coarsening_factor=r, dx=dx, dy=dy,
+                    device=device, dtype=dtype,
+                )
+            clip = "frobenius" if hybrid_clip else None
+            closure = {
+                "hybrid": lambda: HybridClosure(tbnn_c, closure, clip_mode=clip),
+                "exactE": lambda: HybridClosure(tbnn_c, closure, clip_mode=clip, energy_closure=exact_c),
+                "exactS": lambda: HybridClosure(exact_c, closure, clip_mode=clip),
+            }[kind]()
 
         solver_l = RHDSolver(
             Nc_y, Nc_x, cfl=cfl, reconstruction=reconstruction,
@@ -1916,6 +1944,9 @@ if __name__ == "__main__":
     parser.add_argument("--with-hybrid", dest="hybrid_coeff", default=None, metavar="CKPT",
                         help="Add a hybrid run: the TBNN's (--checkpoint) tensor shape "
                              "scaled cell by cell to the energy of this MiNNit checkpoint.")
+    parser.add_argument("--hybrid-ablations", action="store_true",
+                        help="With --with-hybrid, also run TBNN shape x exact energy and "
+                             "exact shape x MiNNit energy (FEASIBILITY §23).")
     parser.add_argument("--hybrid-no-clip", dest="hybrid_clip", action="store_false",
                         help="Disable the realizability clip after the hybrid's rescale "
                              "(the pre-fix behaviour; it diverged in 1 of 14 rollouts).")
@@ -1926,6 +1957,10 @@ if __name__ == "__main__":
                              "solver's own numerical dissipation, which even the exact "
                              "stress cannot undo (the oracle retains only 34%% of the "
                              "DNS high-k energy at t=10).")
+    parser.add_argument("--minit-average", choices=["cell", "x"], default="cell",
+                        help="'cell': Eq. 12 cell by cell. 'x': the paper's mean-field form, "
+                             "growth rate from the x-averaged shear and e_KH uniform along x "
+                             "(use coefficients calibrated with minit_calibrate --average x).")
     parser.add_argument("--minit-coefficients", type=str,
                         default="results/minit/minit_coefficients.json",
                         help="Refit coefficients written by src.minit_calibrate")
@@ -1987,10 +2022,12 @@ if __name__ == "__main__":
         minit_floor_fraction=args.minit_floor_fraction,
         minit_advect=args.minit_advect,
         minit_shear_mode=args.minit_shear_mode,
+        minit_average=args.minit_average,
         learned_coeff=tuple(args.learned_coeff or ()),
         learned_gain=args.learned_gain,
         hybrid_coeff=args.hybrid_coeff,
         hybrid_clip=args.hybrid_clip,
+        hybrid_ablations=args.hybrid_ablations,
         band_windows=[tuple(float(x) for x in w.split(":")) for w in args.band_windows]
         if args.band_windows else None,
         band_skip=args.band_skip,

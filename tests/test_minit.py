@@ -621,3 +621,52 @@ class TestClosureTimeSync:
 
         assert len(closure.history) > 0
         assert not hasattr(closure, "current_t")
+
+
+class TestRowAveragedMInIT:
+    """average='x': MInIT's mean-field form in 2D (paper Sec. 4.3.1)."""
+
+    def _prims(self, N=16):
+        import math
+        y = torch.linspace(0, 1, N + 1, dtype=torch.float64)[:-1].unsqueeze(-1)
+        x = torch.linspace(0, 1, N + 1, dtype=torch.float64)[:-1].unsqueeze(0)
+        p = torch.empty(N, N, 4, dtype=torch.float64)
+        p[..., 0] = 1.0 + 0.2 * torch.sin(2 * math.pi * x).expand(N, N)
+        p[..., 1] = (0.3 * torch.sin(2 * math.pi * y) + 0.05 * torch.cos(4 * math.pi * x)).expand(N, N)
+        p[..., 2] = 0.02 * torch.sin(2 * math.pi * x).expand(N, N)
+        p[..., 3] = 2.5
+        return p
+
+    def test_energy_stays_uniform_along_x(self):
+        p = self._prims()
+        c = MInITClosure(dx=1 / 16, dy=1 / 16, average="x")
+        c.initialize(p, e_KH=torch.rand(16, 16, dtype=torch.float64) * 1e-3)
+        for _ in range(5):
+            c.advance(p, 1e-3)
+        assert torch.allclose(c.e_KH, c.e_KH[:, :1].expand_as(c.e_KH))
+
+    def test_growth_rate_follows_the_mean_shear(self):
+        """gamma(y) must come from d<vx>_x/dy, not from the x-fluctuations."""
+        from src.minit import growth_rate, row_mean
+
+        p = self._prims()
+        c = MInITClosure(dx=1 / 16, dy=1 / 16, average="x", mode="equilibrium")
+        c.initialize(p)
+        mp = c._model_prims(p)
+        expect = growth_rate(row_mean(p[..., 1]), row_mean(p[..., 2]), 1 / 16, 1 / 16,
+                             c.coeffs.A_gamma)
+        assert torch.allclose(growth_rate(mp[..., 1], mp[..., 2], 1 / 16, 1 / 16, c.coeffs.A_gamma),
+                              expect)
+
+    def test_advection_is_rejected_in_the_averaged_model(self):
+        with pytest.raises(ValueError, match="advect"):
+            MInITClosure(dx=1 / 16, dy=1 / 16, average="x", advect=True)
+
+    def test_cell_mode_is_unchanged(self):
+        p = self._prims()
+        a = MInITClosure(dx=1 / 16, dy=1 / 16)
+        b = MInITClosure(dx=1 / 16, dy=1 / 16, average="cell")
+        e0 = torch.rand(16, 16, dtype=torch.float64) * 1e-3
+        a.initialize(p, e_KH=e0.clone()); b.initialize(p, e_KH=e0.clone())
+        a.advance(p, 1e-3); b.advance(p, 1e-3)
+        assert torch.equal(a.e_KH, b.e_KH)

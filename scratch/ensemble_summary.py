@@ -26,7 +26,9 @@ import numpy as np
 
 root = sys.argv[1] if len(sys.argv) > 1 else "results/ensemble"
 NAMES = {"unclosed": "unclosed", "TBNN": "TBNN", "learned-coeff": "MiNNit",
-         "hybrid (TBNN shape x MiNNit amp)": "hybrid", "exact DNS": "oracle"}
+         "hybrid (TBNN shape x MiNNit amp)": "hybrid", "exact DNS": "oracle",
+         "ablation (TBNN shape x exact energy)": "exactE",
+         "ablation (exact shape x MiNNit energy)": "exactS"}
 
 
 def canon(members):

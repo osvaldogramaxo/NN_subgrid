@@ -28,7 +28,7 @@ model.eval()
 
 files = sorted(glob.glob(f"{data_dir}/h*.h5"))
 snaps = [s for s in (read_snapshot(f) for f in files[::10]) if s["t"] >= 1.0 - 1e-9]
-taus = {"TBNN": [], "MiNNit": [], "hybrid": []}
+taus = {"TBNN": [], "MiNNit": [], "hybrid": [], "TBNN shape x exact e": [], "exact shape x MiNNit e": []}
 exact, S_all, fb = [], [], []
 for snap in snaps:
     fine = [torch.tensor(snap[k], dtype=DT) for k in ("rho", "vx", "vy", "p")]
@@ -40,11 +40,16 @@ for snap in snaps:
                         ck["thermo_std"], dx, dy)
     le = LearnedMInITClosure.load(ckpt_l, dx, dy)
     hy = HybridClosure(tb, le)
+    exact_c = lambda _p, t=tau_ex: (t, torch.ones(t.shape[:2], dtype=DT))   # this snapshot's exact stress
+    abl_e = HybridClosure(tb, le, energy_closure=exact_c)   # TBNN shape, exact energy
+    abl_s = HybridClosure(exact_c, le)                       # exact shape, MiNNit energy
     pick = lambda t: torch.stack([t[..., 1, 1], t[..., 2, 2], t[..., 1, 2]], -1)
     with torch.no_grad():
         taus["TBNN"].append(pick(tb(prims)[0]))
         taus["MiNNit"].append(pick(le(prims)[0]))
         taus["hybrid"].append(pick(hy(prims)[0]))
+        taus["TBNN shape x exact e"].append(pick(abl_e(prims)[0]))
+        taus["exact shape x MiNNit e"].append(pick(abl_s(prims)[0]))
     fb.append(hy.fallback_fraction)
     exact.append(pick(tau_ex))
     a, b_ = periodic_gradient_2d(c["vx_tilde"], dx, dy, order=4)
@@ -56,10 +61,10 @@ d["e_dns"] = 0.5 * (d["tau"][..., 0] + d["tau"][..., 1])
 k_hi = Nx // 4
 print(f"r={r}, {len(snaps)} snapshots of {data_dir}, hybrid fallback cells "
       f"{100 * sum(fb) / len(fb):.1f}%")
-print(f"{'model':<8} {'amp':>6} {'corr':>7} {'Eq25':>7} {'Pi/Pi_ex':>9} {'hi-k':>6} "
+print(f"{'model':<24} {'amp':>6} {'corr':>7} {'Eq25':>7} {'Pi/Pi_ex':>9} {'hi-k':>6} "
       f"{'hi-k ex':>8}  amp 1st->2nd")
 for name, series in taus.items():
     s = score_tau(torch.stack(series), d, stride=1, k_hi=k_hi)
-    print(f"{name:<8} {s['amp']:>6.3f} {s['corr']:>+7.3f} {s['l2_eq25']:>7.3f} "
+    print(f"{name:<24} {s['amp']:>6.3f} {s['corr']:>+7.3f} {s['l2_eq25']:>7.3f} "
           f"{s['pi']:>9.3f} {s['hik']*100:>5.1f}% {s['hik_exact']*100:>7.1f}%  "
           f"{s['amp_first']:.3f} -> {s['amp_second']:.3f}")

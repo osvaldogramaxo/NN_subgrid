@@ -790,3 +790,46 @@ early and middle windows; late ($t > 7.2$) the two are level (+0.023 ± 0.012).
 Infrastructure: the TBNN dataset build and `evaluate_rollout` now read snapshots one at a time /
 only inside the time window (`dataset.snapshot_files`); a 2048² run would otherwise need ~27 GB
 just to build the training set.
+
+
+---
+
+## 24. A fair MInIT: the paper's averaged growth rate (2026-10-21)
+
+The port applied Eq. 12 cell by cell, with $\gamma_\text{KH} = A_\gamma|\partial_y v_x|$ from each coarse
+cell and no advection. The paper instead takes $\gamma_\text{KH}$ from the resolved shear at the
+initial layer positions, *"averaged for different points in the xz plane and over the ± shears to
+obtain a single value"* (Sec. 4.3.1), and drops advection because that average cancels it. MInIT
+is a mean-field model, so the 2D equivalent is the average over the homogeneous direction $x$:
+$\gamma(y) = A_\gamma|\partial_y\langle v_x\rangle_x|$, with $e_\text{KH}$, $\rho$ row averages
+and the stress $\beta_{ij}e(y)$ uniform along $x$; $\langle v_y\rangle_x \approx 0$, so advection
+vanishes for the paper's reason. Implemented as `MInITClosure(average="x")`,
+`minit_calibrate --average x` (fits against the $x$-averaged exact stress, as the paper fits
+box-averaged stresses) and `evaluate_rollout --minit-average x`.
+
+**Calibration** on each training run over $t = 1$–20, both forms, with the paper's procedure
+($A_\gamma = 0.14$ fixed, then the equilibrium ratio). **Scoring** on unseen runs
+(`scratch/minit_fair_compare.py`), per snapshot, against the exact stress cell by cell and
+against its $x$-average (every model's stress $x$-averaged too). MInIT's ODE runs are seeded with
+the exact $e_\text{KH}$ at $t = 1$; MiNNit has no seed.
+
+| unseen, Eq. 25 cell / Eq. 25 x-avg / corr x-avg | 1024², r = 16 | 1024², r = 64 | 2048², r = 128 (5 runs) |
+|---|---|---|---|
+| MiNNit | **0.77 / 0.54** / 0.74 | **0.78 / 0.53** / 0.76 | **0.75 / 0.56** / 0.74 |
+| MInIT cell, refitted ODE | 2.01 / 1.78 / 0.46 | 1.11 / 1.02 / 0.47 | 1.20 / 1.01 / 0.49 |
+| MInIT cell, equilibrium | 1.41 / 1.11 / 0.66 | 0.99 / 0.70 / **0.76** | 1.03 / 0.75 / **0.74** |
+| MInIT x-avg, refitted ODE | 3.83 / 1.45 / 0.42 | 1.39 / 1.12 / 0.43 | 1.73 / 1.20 / 0.47 |
+| MInIT x-avg, equilibrium | 3.44 / 1.02 / 0.57 | 1.38 / 0.76 / 0.74 | 1.72 / 0.91 / 0.72 |
+| MInIT, paper coefficients ODE | 44–57 / 14–16 | 11–14 / 8–9 | 14–19 / 10–12 |
+
+1. **The paper's averaging does not rescue MInIT here:** on unseen data the mean-field form is no
+   better than the cell form, often worse. With the published $C = 10.6$ (a 3D value) the ODE
+   collapses to 5–9% of the exact amplitude.
+2. **MiNNit beats every MInIT variant on Eq. 25, under both targets, at every filter.**
+3. **On the correlation of the $x$-averaged stress, MInIT's equilibrium limit ties MiNNit at
+   $\Delta_f = 1/16$** (0.76 vs 0.76, 0.74 vs 0.74): there MiNNit's lead is amplitude, not
+   structure. Hence the rollout test (`condor_ensemble_2k_minit.sub`, both forms, paired with
+   the r = 128 ensemble).
+4. In-sample, pooled over snapshots (the calibration script's own score), the mean-field ODE looks
+   far better (corr 0.94 one interval, 0.69 free-running at $r = 16$). The per-snapshot, unseen
+   numbers above are the comparable ones.

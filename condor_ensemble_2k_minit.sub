@@ -1,0 +1,37 @@
+# MInIT in the r = 128 rollout ensemble, both forms (FEASIBILITY §24): 'cell' (Eq. 12 cell by
+# cell) and 'x' (the paper's mean-field form, growth rate from the x-averaged shear). Paper,
+# refitted-ODE and equilibrium variants, coefficients calibrated on dns2k_s0 over t = 1-20 in
+# the same form. Same 10 starting states as condor_ensemble_2k_abl.sub, so the runs pair with
+# the TBNN / MiNNit / hybrid / exact rows there; this job adds MInIT and a no-closure control.
+universe       = vanilla
+executable     = ./run_evaluate.sh
+arguments      = "dns2k_s$(seed) 128 none 1.0 10.0 cuda 0.75 mp5 hllc --skip-exact --with-unclosed --save-history --anim-interval 0.1 --with-minit all --minit-average $(avg) --minit-coefficients results/minit_fair/coeffs_2k_r128_$(avg).json --perturb-seed $(member) --perturb-amplitude 0.01 --output-dir results/ensemble_2k_r128_minit_$(avg)/dns2k_s$(seed)_s$(member)"
+output         = ./condor_logs/ens2kmi_$(Cluster)_$(avg)_s$(seed)_m$(member).out
+error          = ./condor_logs/ens2kmi_$(Cluster)_$(avg)_s$(seed)_m$(member).err
+log            = ./condor_logs/ens2kmi_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 65536
+request_gpus   = 1
+queue avg,seed,member from (
+  cell, 1, 0
+  cell, 1, 1
+  cell, 2, 0
+  cell, 2, 1
+  cell, 3, 0
+  cell, 3, 1
+  cell, 4, 0
+  cell, 4, 1
+  cell, 5, 0
+  cell, 5, 1
+  x, 1, 0
+  x, 1, 1
+  x, 2, 0
+  x, 2, 1
+  x, 3, 0
+  x, 3, 1
+  x, 4, 0
+  x, 4, 1
+  x, 5, 0
+  x, 5, 1
+)

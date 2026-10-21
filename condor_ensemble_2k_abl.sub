@@ -1,0 +1,25 @@
+# Shape/energy ablations of the hybrid (FEASIBILITY §23). r = 128 rollout ensemble on the 2048^2 realisations unseen in training (seeds 1-5),
+# two members each (unperturbed, 1% perturbation). Models trained on dns2k_s0 at r = 128.
+# ~35-40 GB resident (all window snapshots at 2048^2 are held in memory). FEASIBILITY §22.
+universe       = vanilla
+executable     = ./run_evaluate.sh
+arguments      = "dns2k_s$(seed) 128 checkpoints_2k_r128/best_model.pt 1.0 10.0 cuda 0.75 mp5 hllc --with-unclosed --save-history --anim-interval 0.1 --with-learned results/dns2k/minit_coeff_2k_r128.pt --with-hybrid results/dns2k/minit_coeff_2k_r128.pt --hybrid-ablations --perturb-seed $(member) --perturb-amplitude 0.01 --output-dir results/ensemble_2k_r128_abl/dns2k_s$(seed)_s$(member)"
+output         = ./condor_logs/ens2kabl_$(Cluster)_s$(seed)_m$(member).out
+error          = ./condor_logs/ens2kabl_$(Cluster)_s$(seed)_m$(member).err
+log            = ./condor_logs/ens2kabl_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 65536
+request_gpus   = 1
+queue seed,member from (
+  1, 0
+  1, 1
+  2, 0
+  2, 1
+  3, 0
+  3, 1
+  4, 0
+  4, 1
+  5, 0
+  5, 1
+)

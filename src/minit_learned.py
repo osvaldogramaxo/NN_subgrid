@@ -466,24 +466,43 @@ class HybridClosure:
 
     The result is clipped for realizability *after* the rescale (``clip_mode``,
     ``‖τ‖_F ≤ κ p`` by default, the same bound the TBNN closure applies). The TBNN
-    closure clips its own output, but the rescale ``e_MiNNit / e_TBNN`` reaches ~20x
+    closure clips its own output, but the rescale ``e_MiNNit / e_TBNN`` exceeds 700x
     where ``e_TBNN`` sits just above the floor, so without a second clip the hybrid
     stress is unbounded -- it diverged in 1 of 14 rollouts that way (FEASIBILITY
     §19-20). ``clip_mode=None`` restores the unclipped behaviour.
+
+    Shape/energy ablations (FEASIBILITY §23): the shape comes from ``tbnn_closure``,
+    which may be any closure (the exact-DNS one included). ``energy_closure``, if
+    given, replaces MiNNit as the energy source, ``e = (tau^xx + tau^yy)/2`` of its
+    stress; the fallback is then MInIT's ``beta_ij e`` with that energy, so only the
+    factor under test changes.
     """
 
     def __init__(self, tbnn_closure, learned_closure: LearnedMInITClosure,
                  floor: float = 0.05, clip_mode: str | None = "frobenius",
-                 clip_kappa: float = 0.5):
+                 clip_kappa: float = 0.5, energy_closure=None):
         self.tbnn, self.learned, self.floor = tbnn_closure, learned_closure, floor
+        self.energy = energy_closure
         self.clip_mode, self.clip_kappa = clip_mode, clip_kappa
         self.fallback_fraction: float | None = None    # diagnostic, last call
         self.max_scale: float | None = None             # diagnostic, last call
 
+    def set_time(self, t: float) -> None:
+        # The solver syncs time-dependent closures (the exact-DNS one) through set_time;
+        # a wrapper that swallowed it would freeze them at their first snapshot.
+        for c in (self.tbnn, self.learned, self.energy):
+            if c is not None and hasattr(c, "set_time"):
+                c.set_time(t)
+
     def __call__(self, prims: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         tau_t, alpha = self.tbnn(prims)
-        tau_l, _ = self.learned(prims)
-        e_l = self.learned.e_KH
+        if self.energy is None:
+            tau_l, _ = self.learned(prims)
+            e_l = self.learned.e_KH
+        else:
+            tau_e, _ = self.energy(prims)
+            e_l = (0.5 * (tau_e[..., 1, 1] + tau_e[..., 2, 2])).clamp(min=0.0)
+            tau_l = assemble_tau(e_l, prims, self.learned.coeffs)
         e_t = 0.5 * (tau_t[..., 1, 1] + tau_t[..., 2, 2])
         ok = e_t > self.floor * e_l.mean()
         scale = torch.where(ok, e_l / e_t.clamp(min=1e-300), torch.zeros_like(e_t))

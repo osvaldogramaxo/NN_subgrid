@@ -792,6 +792,28 @@ only inside the time window (`dataset.snapshot_files`); a 2048² run would other
 just to build the training set.
 
 
+
+---
+
+## 23. Where the hybrid's remaining error is: energy, not shape (2026-10-21)
+
+Ablations replace one factor of the hybrid with the exact DNS's (`HybridClosure(energy_closure=...)`,
+`evaluate_rollout --hybrid-ablations`, `scratch/hybrid_apriori.py`); the fallback stays MInIT's
+$\beta e$ with the energy under test.
+
+**A-priori, unseen** (Eq. 25 / corr): 2048², $r=128$, mean of 5 realisations — hybrid 0.49 / 0.86;
+exact shape × MiNNit energy 0.43 / 0.89; **TBNN shape × exact energy 0.25 / 0.96**. 1024², $r=64$:
+0.55 / 0.84; 0.50 / 0.87; 0.23 / 0.97.
+
+**Rollouts**, 2048², $r=128$, 10 members, $t=1.5$–10, log-spectral distance: **TBNN shape × exact
+energy 0.397** (lowest in 10/10), exact stress 0.428, hybrid 0.525, exact shape × MiNNit energy 0.544,
+MiNNit 0.556. Paired, hybrid − exact-shape ablation −0.020 ± 0.016 (no difference).
+
+A perfect energy closes the whole gap to the exact stress and more; a perfect shape is worth almost
+nothing. So a jointly trained or shape-only hybrid would buy little; the lever is MiNNit's energy
+prediction (unseen $R^2(e) \approx 0.8$). TBNN shape × exact energy beating the exact stress itself is
+the familiar effect that the true stress is not the optimal correction for the coarse solver.
+
 ---
 
 ## 24. A fair MInIT: the paper's averaged growth rate (2026-10-21)

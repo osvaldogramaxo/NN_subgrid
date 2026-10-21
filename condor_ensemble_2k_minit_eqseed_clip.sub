@@ -1,0 +1,25 @@
+# Seed control with the realizability clip (FEASIBILITY §25): the refitted cell-by-cell MInIT started from its
+# own equilibrium energy at t = 1 instead of the exact DNS energy -- no DNS information, the same
+# footing as MiNNit and the hybrid. Same 10 starting states as condor_ensemble_2k_abl.sub.
+universe       = vanilla
+executable     = ./run_evaluate.sh
+arguments      = "dns2k_s$(seed) 128 none 1.0 10.0 cuda 0.75 mp5 hllc --skip-exact --with-unclosed --save-history --anim-interval 0.1 --with-minit fitted --minit-seed equilibrium --minit-clip --minit-coefficients results/minit_fair/coeffs_2k_r128_cell.json --perturb-seed $(member) --perturb-amplitude 0.01 --output-dir results/ensemble_2k_r128_minit_eqseed_clip/dns2k_s$(seed)_s$(member)"
+output         = ./condor_logs/ens2kmsc_$(Cluster)_s$(seed)_m$(member).out
+error          = ./condor_logs/ens2kmsc_$(Cluster)_s$(seed)_m$(member).err
+log            = ./condor_logs/ens2kmsc_$(Cluster).log
+getenv         = True
+request_cpus   = 4
+request_memory = 65536
+request_gpus   = 1
+queue seed,member from (
+  1, 0
+  1, 1
+  2, 0
+  2, 1
+  3, 0
+  3, 1
+  4, 0
+  4, 1
+  5, 0
+  5, 1
+)

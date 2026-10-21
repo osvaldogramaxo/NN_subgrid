@@ -1022,6 +1022,7 @@ def evaluate_rollout(
     minit_advect: bool = False,
     minit_shear_mode: str = "dvxdy",
     minit_average: str = "cell",
+    minit_clip: bool = False,
     learned_coeff: tuple[str, ...] = (),
     learned_gain: float = 1.0,
     hybrid_coeff: str | None = None,
@@ -1387,6 +1388,7 @@ def evaluate_rollout(
                 shear_mode=minit_shear_mode,
                 mode=mode,
                 average=minit_average,
+                clip_mode="frobenius" if minit_clip else None,
                 advect=minit_advect,
                 e_seed=minit_e_seed,
                 floor_fraction=minit_floor_fraction,
@@ -1968,6 +1970,9 @@ if __name__ == "__main__":
                              "solver's own numerical dissipation, which even the exact "
                              "stress cannot undo (the oracle retains only 34%% of the "
                              "DNS high-k energy at t=10).")
+    parser.add_argument("--minit-clip", action="store_true",
+                        help="Clip MInIT's stress for realizability (||tau||_F <= 0.5 p), the "
+                             "bound the TBNN and hybrid closures apply. Off by default.")
     parser.add_argument("--minit-average", choices=["cell", "x"], default="cell",
                         help="'cell': Eq. 12 cell by cell. 'x': the paper's mean-field form, "
                              "growth rate from the x-averaged shear and e_KH uniform along x "
@@ -2035,6 +2040,7 @@ if __name__ == "__main__":
         minit_advect=args.minit_advect,
         minit_shear_mode=args.minit_shear_mode,
         minit_average=args.minit_average,
+        minit_clip=args.minit_clip,
         learned_coeff=tuple(args.learned_coeff or ()),
         learned_gain=args.learned_gain,
         hybrid_coeff=args.hybrid_coeff,

@@ -494,6 +494,13 @@ class HybridClosure:
             if c is not None and hasattr(c, "set_time"):
                 c.set_time(t)
 
+    def advance(self, prims: torch.Tensor, dt: float, t: float | None = None) -> None:
+        # Stateful parts (MInIT's evolved e_KH as the energy source) step once per
+        # completed solver step; without this they would stay frozen at their seed.
+        for c in (self.tbnn, self.learned, self.energy):
+            if c is not None and hasattr(c, "advance"):
+                c.advance(prims, dt, t=t)
+
     def __call__(self, prims: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         tau_t, alpha = self.tbnn(prims)
         if self.energy is None:

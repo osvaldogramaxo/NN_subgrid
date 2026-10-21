@@ -42,7 +42,9 @@ from src.dataset import (
 )
 from src.config import add_config_arguments, apply_config_defaults, configure
 from src.features import extract_tbnn_features
-from src.minit import MInITClosure, MInITCoefficients, subgrid_energy_from_stress
+from src.minit import (
+    MInITClosure, MInITCoefficients, growth_rate, saturation_energy, subgrid_energy_from_stress,
+)
 from src.minit_learned import HybridClosure, LearnedMInITClosure
 from src.solver import RHDSolver, compute_transition_sensor, clip_sgs_tensor, clip_backscatter, smooth_sgs_tensor
 
@@ -1355,6 +1357,8 @@ def evaluate_rollout(
                   f"(mean {float(e_seed_field.mean()):.3e}, max {float(e_seed_field.max()):.3e})")
         elif minit_seed == "uniform":
             print(f"\nMInIT seed: uniform e_KH = {minit_e_seed:.3e} (no DNS information)")
+        elif minit_seed == "equilibrium":
+            print("\nMInIT seed: its own equilibrium energy e_sat at t_start (no DNS information)")
         else:
             raise ValueError(f"unknown MInIT seed mode {minit_seed!r}")
 
@@ -1390,6 +1394,13 @@ def evaluate_rollout(
                 backscatter_fraction=backscatter_fraction,
                 tau_smooth_passes=tau_smooth_passes,
             )
+            if minit_seed == "equilibrium":
+                # The model's own fixed point at the initial state: a seed with no DNS
+                # information, so the ODE runs compete on the same footing as MiNNit.
+                mp = closure._model_prims(solver_minit.prims)
+                g = growth_rate(mp[..., 1], mp[..., 2], dx, dy, coeffs.A_gamma,
+                                mode=minit_shear_mode)
+                e_seed_field = saturation_energy(g, mp[..., 0], closure.lambda_KH, coeffs.C)
             closure.initialize(solver_minit.prims, e_KH=e_seed_field)
 
             ok_minit = _safe_evolve(
@@ -1964,11 +1975,12 @@ if __name__ == "__main__":
     parser.add_argument("--minit-coefficients", type=str,
                         default="results/minit/minit_coefficients.json",
                         help="Refit coefficients written by src.minit_calibrate")
-    parser.add_argument("--minit-seed", type=str, default="dns", choices=["dns", "uniform"],
+    parser.add_argument("--minit-seed", type=str, default="dns", choices=["dns", "uniform", "equilibrium"],
                         help="e_KH = 0 is a fixed point, so MInIT needs a seed. 'dns' "
                              "takes the exact filtered-DNS subgrid energy at t_start "
                              "(one snapshot of ground truth, as the oracle also gets); "
-                             "'uniform' is self-contained. Different experiments.")
+                             "'uniform' is self-contained; 'equilibrium' starts from the "
+                             "model's own e_sat at t_start (no DNS information). Different experiments.")
     parser.add_argument("--minit-e-seed", type=float, default=1e-6,
                         help="Uniform seed value for --minit-seed uniform")
     parser.add_argument("--minit-floor-fraction", type=float, default=0.0,

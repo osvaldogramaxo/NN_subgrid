@@ -855,3 +855,40 @@ the exact $e_\text{KH}$ at $t = 1$; MiNNit has no seed.
 4. In-sample, pooled over snapshots (the calibration script's own score), the mean-field ODE looks
    far better (corr 0.94 one interval, 0.69 free-running at $r = 16$). The per-snapshot, unseen
    numbers above are the comparable ones.
+
+
+---
+
+## 25. In long rollouts, the refitted MInIT ODE ties the hybrid (2026-10-21)
+
+MInIT added to the 2048², $r=128$ ensemble on the same 10 starting states as §22–23 (no-closure
+control reproduces to $9\times10^{-14}$, so runs pair exactly); `scratch/minit_rollout_merge.py`.
+
+| run ($t = 1.5$–10) | spectral distance | diverged |
+|---|---|---|
+| exact stress | 0.428 ± 0.007 | 0/10 |
+| MInIT refitted ODE, cell, DNS-seeded | 0.471 ± 0.010 | 0/10 |
+| MInIT refitted ODE, cell, equilibrium seed | 0.514 ± 0.019 (7 survivors) | **3/10** |
+| **MInIT refitted ODE, cell, equilibrium seed, realizability clip** | **0.520 ± 0.017** | 0/10 |
+| hybrid | 0.525 ± 0.014 | 0/10 |
+| MiNNit | 0.556 ± 0.009 | 0/10 |
+| MInIT equilibrium, cell | 0.615 ± 0.039 | 0/10 |
+| MInIT x-averaged (paper's form), refitted ODE / equilibrium | 0.806 / 0.857 | 0/10 |
+| TBNN | 0.844 ± 0.066 | 0/10 |
+| MInIT, published coefficients (cell / x-avg) | 0.879 / 0.906 | 0/10 |
+| no closure | 0.917 ± 0.052 | — |
+
+**Fair comparison** (no DNS seed, the same $\lVert\tau\rVert_F \le 0.5p$ bound as the TBNN/hybrid):
+the refitted cell-by-cell MInIT ties the hybrid (−0.005 ± 0.026, better in 5/10) and is closer to
+the DNS than MiNNit by 0.036 ± 0.020 (8/10; ~1.8σ). The DNS seed was worth ~0.05; without the clip the
+unseeded ODE diverged in 3/10 runs.
+
+1. **This reverses the a-priori verdict on MInIT's ODE**, which scored near the bottom a priori
+   (Eq. 25 ≈ 1.2, corr ≈ 0.36, §24). The ODE gives the sub-grid energy memory; dynamically that is
+   worth more than the snapshot accuracy a-priori scores measure.
+2. **The paper's mean-field form does not work as a local closure** (stress uniform along $x$), and
+   the published coefficients ($C = 10.6$, 3D) barely beat no closure.
+3. Supersedes the "MiNNit beats MInIT" reading of §§8–22 for simulations at $\Delta_f = 1/16$; the
+   a-priori statements stand.
+4. Next: TBNN shape × MInIT-ODE energy (the hybrid's error is in the energy, §23), which needs
+   `HybridClosure` to forward the solver's `advance` hook to a stateful energy closure.

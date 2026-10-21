@@ -1,7 +1,10 @@
 """A-priori: TBNN vs MiNNit vs hybrid (TBNN shape x MiNNit amplitude) on the
 unseen dns_khi_s1 run, every model run through its actual solver closure.
-Usage: python scratch/hybrid_apriori.py [r] [data_dir] [tbnn_ckpt] [minnit_ckpt]
+Usage: python scratch/hybrid_apriori.py [r] [data_dir] [tbnn_ckpt] [minnit_ckpt] [minit_coeffs reduction]
 (defaults: 16, dns_khi_s1, checkpoints_r{r}/best_model.pt, the r's MiNNit checkpoint)
+With MInIT coefficients and the run's reduction cache, also scores TBNN shape x MInIT's
+evolved energy (FEASIBILITY §26): the cell-by-cell ODE integrated along the filtered DNS
+from t = 1, seeded with the exact energy or at its own equilibrium (as in the rollouts).
 """
 import glob
 import sys
@@ -29,6 +32,22 @@ model.eval()
 files = sorted(glob.glob(f"{data_dir}/h*.h5"))
 snaps = [s for s in (read_snapshot(f) for f in files[::10]) if s["t"] >= 1.0 - 1e-9]
 taus = {"TBNN": [], "MiNNit": [], "hybrid": [], "TBNN shape x exact e": [], "exact shape x MiNNit e": []}
+e_minit = {}
+if len(sys.argv) > 6:
+    from src.minit import LAMBDA_OVER_DELTA, MInITCoefficients, saturation_energy  # noqa: E402
+    from src.minit_calibrate import evolve_e_series  # noqa: E402
+    from src.train_minit_coeff import load_reduction  # noqa: E402
+    mc = MInITCoefficients.load(sys.argv[5])
+    red = load_reduction(Path(sys.argv[6]), 1.0)
+    lam = LAMBDA_OVER_DELTA / red["rho"].shape[-1]
+    A, C = (torch.tensor([v], dtype=DT) for v in (mc.A_gamma, mc.C))
+    seeds = {"DNS seed": red["e_dns"][0].clamp(min=0.0),
+             "eq. seed": saturation_energy(mc.A_gamma * red["shear"][0], red["rho"][0], lam, mc.C)}
+    for tag, e0 in seeds.items():
+        e_minit[tag] = evolve_e_series(e0, red["shear"], red["rho"], red["t"], A, C, lam, 10)[0]
+        taus[f"TBNN shape x MInIT e ({tag})"] = []
+    taus["MInIT ODE (eq. seed)"] = []
+    beta_m = torch.tensor([mc.beta_xx, mc.beta_yy, mc.beta_xy], dtype=DT)
 exact, S_all, fb = [], [], []
 for snap in snaps:
     fine = [torch.tensor(snap[k], dtype=DT) for k in ("rho", "vx", "vy", "p")]
@@ -50,6 +69,14 @@ for snap in snaps:
         taus["hybrid"].append(pick(hy(prims)[0]))
         taus["TBNN shape x exact e"].append(pick(abl_e(prims)[0]))
         taus["exact shape x MiNNit e"].append(pick(abl_s(prims)[0]))
+        for tag, es in e_minit.items():
+            e = es[int(torch.argmin((red["t"] - snap["t"]).abs()))]
+            tau_m = torch.zeros(*e.shape, 4, 4, dtype=DT)
+            tau_m[..., 1, 1] = tau_m[..., 2, 2] = e       # only its trace, e, is used
+            hm = HybridClosure(tb, le, energy_closure=lambda _p, t=tau_m: (t, None))
+            taus[f"TBNN shape x MInIT e ({tag})"].append(pick(hm(prims)[0]))
+            if tag == "eq. seed":
+                taus["MInIT ODE (eq. seed)"].append(e.unsqueeze(-1) * beta_m)
     fb.append(hy.fallback_fraction)
     exact.append(pick(tau_ex))
     a, b_ = periodic_gradient_2d(c["vx_tilde"], dx, dy, order=4)
@@ -61,10 +88,10 @@ d["e_dns"] = 0.5 * (d["tau"][..., 0] + d["tau"][..., 1])
 k_hi = Nx // 4
 print(f"r={r}, {len(snaps)} snapshots of {data_dir}, hybrid fallback cells "
       f"{100 * sum(fb) / len(fb):.1f}%")
-print(f"{'model':<24} {'amp':>6} {'corr':>7} {'Eq25':>7} {'Pi/Pi_ex':>9} {'hi-k':>6} "
+print(f"{'model':<34} {'amp':>6} {'corr':>7} {'Eq25':>7} {'Pi/Pi_ex':>9} {'hi-k':>6} "
       f"{'hi-k ex':>8}  amp 1st->2nd")
 for name, series in taus.items():
     s = score_tau(torch.stack(series), d, stride=1, k_hi=k_hi)
-    print(f"{name:<24} {s['amp']:>6.3f} {s['corr']:>+7.3f} {s['l2_eq25']:>7.3f} "
+    print(f"{name:<34} {s['amp']:>6.3f} {s['corr']:>+7.3f} {s['l2_eq25']:>7.3f} "
           f"{s['pi']:>9.3f} {s['hik']*100:>5.1f}% {s['hik_exact']*100:>7.1f}%  "
           f"{s['amp_first']:.3f} -> {s['amp_second']:.3f}")

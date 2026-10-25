@@ -892,3 +892,37 @@ unseeded ODE diverged in 3/10 runs.
    a-priori statements stand.
 4. Next: TBNN shape × MInIT-ODE energy (the hybrid's error is in the energy, §23), which needs
    `HybridClosure` to forward the solver's `advance` hook to a stateful energy closure.
+
+
+## 26. TBNN shape × MInIT's evolved energy: as close to the DNS as the exact stress (2026-10-25)
+
+`HybridClosure` with `energy_closure` = the refitted cell-by-cell MInIT ODE (unclipped, seeded at its
+own equilibrium, so no DNS information; the hybrid clips after its rescale). The hybrid now forwards
+the solver's `advance` hook so the energy evolves. `--hybrid-minit`, `condor_ensemble_2k_hybrid_minit.sub`,
+same 10 starting states as §22–25. Pairing: no-closure control reproduces to 1e-14; the rerun TBNN and
+hybrid rows to ≤ 1.3e-4 in LSD (NN inference round-off on different V100 nodes, amplified over the run;
+negligible against the effects below).
+
+| run ($t = 1.5$–10, 2048², $r = 128$) | spectral distance | total KE |
+|---|---|---|
+| **TBNN shape × MInIT-ODE energy** | **0.415 ± 0.014** | 1.096 |
+| exact stress | 0.428 ± 0.007 | 1.038 |
+| MInIT ODE alone (eq. seed, clipped) | 0.520 ± 0.017 | 1.153 |
+| hybrid (TBNN shape × MiNNit energy) | 0.525 ± 0.014 | 1.103 |
+| MiNNit | 0.556 ± 0.009 | 1.124 |
+| TBNN | 0.844 ± 0.066 | 1.237 |
+
+Paired: better than the MiNNit hybrid by 0.110 ± 0.017 (10/10), than MInIT alone by 0.105 ± 0.021 (10/10),
+than MiNNit by 0.141 ± 0.014 (10/10); tied with the exact stress (−0.013 ± 0.014, 5/10). No divergences.
+
+**A priori it is poor** (`scratch/hybrid_apriori.py` with MInIT args, 5 realisations): Eq. 25
+1.311 ± 0.067, corr 0.445 (DNS-seeded: 1.157, 0.463), against the MiNNit hybrid's 0.491 / 0.861 and
+MInIT alone 1.356 / 0.344. The TBNN shape barely helps the snapshot scores but adds 0.105 dynamically.
+
+1. Strongest evidence yet that a-priori scores do not rank closures here: the best simulation closure
+   is near the bottom a priori.
+2. The two ingredients are complementary: the TBNN's tensor shape (best a priori, §23: TBNN shape ×
+   exact energy 0.397) and MInIT's energy memory (best dynamic energy, §25).
+3. Caveats: one filter width ($\Delta_f = 1/16$), one metric family (spectra); the KE excess (1.10 vs
+   the exact stress's 1.04) remains, so matching the exact stress's spectral distance does not mean it
+   reproduces the true stress.

@@ -926,3 +926,57 @@ MInIT alone 1.356 / 0.344. The TBNN shape barely helps the snapshot scores but a
 3. Caveats: one filter width ($\Delta_f = 1/16$), one metric family (spectra); the KE excess (1.10 vs
    the exact stress's 1.04) remains, so matching the exact stress's spectral distance does not mean it
    reproduces the true stress.
+
+## 27. Amplitude, not memory: a scaled memoryless hybrid ties the MInIT-energy hybrid (2026-10-26)
+
+Test of whether rollout skill at $r = 128$ follows stress amplitude. **(a) A priori on the rollout
+window** (`APRIORI_WINDOW=1.5,10,5 scratch/hybrid_apriori.py`, $t = 1.5$–10 every 0.5, 5 realisations,
+logs `results/dns2k/window_apriori_s*.log`):
+
+| model | amp | corr | Eq. 25 window | Eq. 25 $t=1$–20 | rollout |
+|---|---|---|---|---|---|
+| hybrid | 0.95 | 0.88 | 0.49 | 0.49 | 0.525 |
+| MiNNit | 0.99 | 0.75 | 0.68 | 0.75 | 0.556 |
+| TBNN | 0.67 | 0.79 | 0.86 | 0.75 | 0.844 |
+| TBNN shape × MInIT e (eq. seed) | 1.29 | 0.48 | 1.14 | 1.31 | 0.415 |
+| MInIT ODE (eq. seed) | 1.42 | 0.43 | 1.21 | 1.36 | 0.520 |
+| TBNN ×1.6 / ×2.5 | 0.98 / 1.36 | 0.80 / 0.81 | 0.64 / 0.71 | | 0.786 / 0.700 |
+| hybrid ×1.3 / ×1.6 | 1.17 / 1.36 | 0.87 / 0.87 | 0.52 / 0.61 | | 0.449 / 0.425 |
+
+On the window the learned closures rank a priori as in rollouts (TBNN and MiNNit swap relative to
+$t = 1$–20; the TBNN is good only after $t = 10$, which the rollouts never reach). The realizability
+clip caps TBNN ×2.5 at amplitude 1.36. The MInIT-energy models remain last a priori; in the window
+they are the only ones with amplitude > 1.
+
+**(b) Rollouts with scaled stress** (`--tbnn-gain` before the TBNN's clip; `--learned-gain` scales
+MiNNit's e and hence the hybrid; `condor_ensemble_2k_gain.sub`, cluster 1370026, same 10 starting
+states, 20/20 exit 0, merged by `scratch/minit_rollout_merge.py`):
+
+| run | spectral distance | total KE |
+|---|---|---|
+| TBNN shape × MInIT energy (§26) | 0.415 ± 0.014 | 1.096 |
+| **hybrid ×1.6** | **0.425 ± 0.014** | **0.983** |
+| exact stress | 0.428 ± 0.007 | 1.038 |
+| hybrid ×1.3 | 0.449 ± 0.013 | 1.027 |
+| hybrid | 0.525 ± 0.014 | 1.103 |
+| TBNN ×2.5 | 0.700 ± 0.058 | 1.202 |
+| TBNN ×1.6 | 0.786 ± 0.070 | 1.227 |
+| TBNN | 0.844 ± 0.066 | 1.237 |
+
+Paired: hybrid ×1.6 vs hybrid −0.100 ± 0.014 (10/10); vs TBNN shape × MInIT energy +0.010 ± 0.009
+(scaled better 3/10, a tie); vs exact −0.003 ± 0.011 (6/10). TBNN ×2.5 vs TBNN −0.145 ± 0.026 (10/10)
+but still +0.285 behind the §26 run (0/10).
+
+1. **§26's "memory" reading is wrong for the energy.** A memoryless hybrid with its energy scaled to the
+   MInIT models' window amplitude (~1.36) does as well as TBNN shape × MInIT energy, with *better*
+   total KE (0.98 vs 1.10). MInIT's ODE wins because it over-predicts early ($t \lesssim 10$), which
+   happens to be what the coarse solver needs — not because it lags.
+2. Eq. 25 penalises exactly that over-prediction (hybrid ×1.6: 0.61 vs 0.49), which is why a priori and
+   rollout rankings look inverted. Gains were set from a-priori amplitudes, not tuned on rollouts.
+3. Amplitude is not sufficient: the TBNN at the same a-priori amplitude stays far behind (0.700) and
+   barely drains KE (1.20). Its a-priori amplitude is measured on filtered-DNS input; on the coarse
+   solver's own states it evidently differs (cf. the OOD collapse in the TBNN high-k notes). The
+   hybrid's energy comes from MiNNit's scalar, which transfers.
+4. The exact stress at amplitude 1 gets 0.428, so the "needed" over-drive compensates for imperfect
+   models, not a solver deficit per se. Open: measure the closures' actual in-rollout amplitude and
+   dissipation, and whether a gain fitted at one filter transfers to others.

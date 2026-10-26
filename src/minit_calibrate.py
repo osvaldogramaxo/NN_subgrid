@@ -92,6 +92,7 @@ from src.minit import (
     LAMBDA_OVER_DELTA,
     MInITCoefficients,
     advance_e_kh,
+    advect_e_kh,
     growth_rate,
     row_mean,
     saturation_energy,
@@ -253,6 +254,7 @@ def iter_e_series(
     C: torch.Tensor,
     lambda_KH: float,
     substeps: int = 10,
+    vel: tuple[torch.Tensor, torch.Tensor] | None = None,
 ):
     r"""Yield ``(k, e_k)`` for a batch of ``(A_gamma, C)``, one snapshot at a time.
 
@@ -276,6 +278,9 @@ def iter_e_series(
     substeps : sub-steps per snapshot interval. The update is exact for frozen
         coefficients, so this only controls how finely the *time dependence* of
         the shear and density is resolved, not stability.
+    vel : optional (vx, vy), each (T, Ny, Nx) — the coarse DNS velocity. If given,
+        the advective term ``-d_i(v_i e_KH)`` the paper drops is applied before
+        each sub-step's source update (operator splitting, as in MInITClosure).
 
     Yields
     ------
@@ -300,6 +305,8 @@ def iter_e_series(
                 w = (s + 0.5) / substeps
                 shear_s = (1.0 - w) * shear[k] + w * shear[k + 1]
                 rho_s = (1.0 - w) * rho[k] + w * rho[k + 1]
+                if vel is not None:
+                    e = _advect(e, vel, k, k + 1, w, dt)
                 e = advance_e_kh(e, A * shear_s, rho_s.unsqueeze(0), dt, lambda_KH, Cv)
         yield k + 1, e
 
@@ -313,6 +320,7 @@ def one_step_series(
     C: float,
     lambda_KH: float,
     substeps: int = 10,
+    vel: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     r"""Advance the measured ``e_KH`` by exactly one snapshot interval, everywhere.
 
@@ -335,10 +343,19 @@ def one_step_series(
         w = (s + 0.5) / substeps
         shear_s = (1.0 - w) * shear[:-1] + w * shear[1:]
         rho_s = (1.0 - w) * rho[:-1] + w * rho[1:]
+        if vel is not None:
+            e = _advect(e, vel, slice(None, -1), slice(1, None), w, dt_all / substeps)
         # advance_e_kh is elementwise in everything but dt, so the whole batch of
         # intervals advances at once as long as each carries its own dt.
         e = _advance_batched_dt(e, A_gamma * shear_s, rho_s, dt_all / substeps, lambda_KH, C)
     return e
+
+
+def _advect(e, vel, k0, k1, w, dt):
+    """:func:`src.minit.advect_e_kh` with the velocity interpolated between snapshots k0 and k1."""
+    vx, vy = ((1.0 - w) * v[k0] + w * v[k1] for v in vel)
+    Ny, Nx = e.shape[-2:]
+    return advect_e_kh(e, vx, vy, 1.0 / Nx, 1.0 / Ny, dt)
 
 
 def _advance_batched_dt(
@@ -372,6 +389,7 @@ def evolve_e_series(
     C: torch.Tensor,
     lambda_KH: float,
     substeps: int = 10,
+    vel: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Materialise :func:`iter_e_series` as a (P, T, Ny, Nx) tensor.
 
@@ -379,7 +397,7 @@ def evolve_e_series(
     plotted, never for the calibration scan.
     """
     series = [e.clone() for _, e in iter_e_series(
-        e0, shear, rho, times, A_gamma, C, lambda_KH, substeps,
+        e0, shear, rho, times, A_gamma, C, lambda_KH, substeps, vel,
     )]
     return torch.stack(series, dim=1)
 
@@ -436,6 +454,7 @@ def scan_A_C(
     rounds: int = 3,
     substeps: int = 10,
     fix_A_gamma: float | None = None,
+    vel: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> dict:
     r"""Minimise the Eq. (25) norm over ``(A_gamma, C)`` by nested grid scan.
 
@@ -473,7 +492,7 @@ def scan_A_C(
         # (P, Ny*Nx*3) slice is ever resident.
         l2_sq_sum = torch.zeros(flat_A.shape[0], dtype=e_dns.dtype)
         for k, e_k in iter_e_series(
-            e_dns[0], shear, rho, times, flat_A, flat_C, lambda_KH, substeps,
+            e_dns[0], shear, rho, times, flat_A, flat_C, lambda_KH, substeps, vel,
         ):
             model_flat = (e_k.unsqueeze(-1) * beta_vec).flatten(start_dim=-3)
             l2_sq_sum += l2_norm_paper(sim_flat[k].unsqueeze(0), model_flat) ** 2
@@ -732,6 +751,9 @@ def main(argv: list[str] | None = None) -> int:
                          "rate of the x-averaged shear profile, and e_KH, rho and the "
                          "exact stress all averaged over x before fitting and scoring.")
     ap.add_argument("--substeps", type=int, default=10)
+    ap.add_argument("--advect", action="store_true",
+                    help="include the advective term -d_i(v_i e_KH) the paper drops, "
+                         "with the coarse DNS velocity (cell form only)")
     ap.add_argument("--A-range", type=float, nargs=2, default=(0.01, 2.0),
                     metavar=("LO", "HI"), help="search range for A_gamma")
     ap.add_argument("--C-range", type=float, nargs=2, default=(0.1, 60.0),
@@ -786,6 +808,10 @@ def main(argv: list[str] | None = None) -> int:
     tau_exact = sel["tau"]
     shear = sel["strain"] if args.shear_mode == "strain" else sel["shear"]
 
+    if args.advect and args.average == "x":
+        raise ValueError("advection cancels in the x-averaged model; --advect needs --average cell")
+    vel = (sel["vx"], sel["vy"]) if args.advect else None
+
     if args.average == "x":
         if args.shear_mode != "dvxdy":
             raise ValueError("--average x uses the paper's d<vx>_x/dy; use --shear-mode dvxdy")
@@ -806,7 +832,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nGrid: {Nc_y}x{Nc_x} coarse (r={args.coarsening_factor}), "
           f"Delta_f/L={delta_f:.4f}, lambda_KH={lambda_KH:.4f}")
     print(f"Window: t in [{float(t[0]):.2f}, {float(t[-1]):.2f}], {len(t)} snapshots")
-    print(f"Shear estimator: {args.shear_mode}")
+    print(f"Shear estimator: {args.shear_mode}, advection: {'on' if args.advect else 'off'}")
 
     # --- Stage 2: beta ----------------------------------------------------
     beta_lsq = fit_beta_lsq(e_dns, tau_exact)
@@ -830,7 +856,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         common = dict(
             A_range=tuple(args.A_range), C_range=tuple(args.C_range),
-            substeps=args.substeps,
+            substeps=args.substeps, vel=vel,
         )
         scan = scan_A_C(e_dns, tau_exact, shear, sel["rho"], t, beta, lambda_KH, **common)
 
@@ -919,7 +945,7 @@ def main(argv: list[str] | None = None) -> int:
             e_dns[0], shear, sel["rho"], t,
             torch.tensor([c.A_gamma], dtype=e_dns.dtype),
             torch.tensor([c.C], dtype=e_dns.dtype),
-            lambda_KH, args.substeps,
+            lambda_KH, args.substeps, vel,
         )[0]
 
     scores: dict[str, dict] = {}
@@ -932,7 +958,7 @@ def main(argv: list[str] | None = None) -> int:
         e_one = (
             e_model[name][1:] if name == "equilibrium"
             else one_step_series(
-                e_dns, shear, sel["rho"], t, c.A_gamma, c.C, lambda_KH, args.substeps,
+                e_dns, shear, sel["rho"], t, c.A_gamma, c.C, lambda_KH, args.substeps, vel,
             )
         )
         stages = {

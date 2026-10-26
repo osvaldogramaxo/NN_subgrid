@@ -1,0 +1,46 @@
+Loaded cached DNS reduction from results/dns2k/reduction_r128_s0.pt
+
+Grid: 16x16 coarse (r=128), Delta_f/L=0.0625, lambda_KH=0.9875
+Window: t in [1.00, 20.00], 191 snapshots
+Shear estimator: dvxdy, advection: on
+
+--- beta_ij (window average) ---
+  least squares      : {'beta_xx': 1.73308339392248, 'beta_yy': 0.2669166060775201, 'beta_xy': 0.02538028327264964}
+  block ratio (b=16)  : {'beta_xx': 1.3713745036800131, 'beta_yy': 0.6286254963199869, 'beta_xy': 0.03401718541344029}
+  published (Table 2): beta_xx=0.74 beta_yy=0.64 beta_xy=-0.01
+  trace residual (beta_xx+beta_yy-2) = +0.0000  [published: -0.0100 in 3D]
+
+--- (A_gamma, C) fit, Eq. (25) norm ---
+  free 2-parameter : A_gamma=1.4030  C=43.9468   L2=0.7210
+  A_gamma fixed    : A_gamma=0.1400  C=3.8163   L2=0.8543
+  published        : A_gamma=0.14  C=10.6
+  cost of fixing A_gamma at 0.14: dL2 = +0.1333 (+18.5%)
+
+--- equilibrium limit (e_KH = e_sat, no ODE) ---
+  A_gamma/C = 0.02982  (A_gamma=0.14, C=4.6943)   L2=0.7413
+
+--- A-priori scores against the exact SGS stress ---
+    oracle_e : beta_ij e_KH^DNS      — the proportionality ansatz alone
+    one_step : + one interval of the ODE, re-seeded from DNS each snapshot
+    full     : + the ODE run free across the whole window
+  [fitted]
+    oracle_e  rel_L2= 0.3033  corr=+0.9484  (xx +0.986, yy +0.535, xy +0.065)
+    one_step  rel_L2= 0.4803  corr=+0.8651  (xx +0.896, yy +0.486, xy +0.050)
+    full      rel_L2= 0.7483  corr=+0.6398  (xx +0.662, yy +0.447, xy +0.032)
+  [paper]
+    oracle_e  rel_L2= 0.6516  corr=+0.7864  (xx +0.986, yy +0.535, xy -0.065)
+    one_step  rel_L2= 0.7652  corr=+0.7139  (xx +0.884, yy +0.512, xy -0.049)
+    full      rel_L2= 0.9437  corr=+0.4741  (xx +0.551, yy +0.312, xy -0.011)
+  [equilibrium]
+    oracle_e  rel_L2= 0.3033  corr=+0.9484  (xx +0.986, yy +0.535, xy +0.065)
+    one_step  rel_L2= 0.6260  corr=+0.7747  (xx +0.788, yy +0.360, xy +0.025)
+    full      rel_L2= 0.6343  corr=+0.7711  (xx +0.784, yy +0.352, xy +0.025)
+
+--- Energy transfer <Pi> = <tau^ij S_ij>, window mean ---
+  exact  : -9.135839e-03
+  fitted : -1.463557e-03   (+0.160 x exact)
+  paper  : -8.777975e-05   (+0.010 x exact)
+  equilibrium: +1.696160e-03   (-0.186 x exact)
+
+Wrote results/minit_fair/coeffs_2k_r128_cell_advect.json and results/minit_fair/2k_r128_cell_advect/minit_apriori.json
+Wrote figures to results/minit_fair/2k_r128_cell_advect

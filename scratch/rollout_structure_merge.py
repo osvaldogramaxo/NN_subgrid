@@ -23,7 +23,9 @@ ROOTS = {"abl": "results/ensemble_2k_r128_abl", "cell": "results/ensemble_2k_r12
          "x": "results/ensemble_2k_r128_minit_x", "cell, eq-seed": "results/ensemble_2k_r128_minit_eqseed",
          "cell, eq-seed, clip": "results/ensemble_2k_r128_minit_eqseed_clip",
          "hm": "results/ensemble_2k_r128_hybrid_minit",
-         "g1": "results/ensemble_2k_r128_gain/tg1.6_hg1.3", "g2": "results/ensemble_2k_r128_gain/tg2.5_hg1.6"}
+         "g1": "results/ensemble_2k_r128_gain/tg1.6_hg1.3", "g2": "results/ensemble_2k_r128_gain/tg2.5_hg1.6",
+         "clip, adv": "results/ensemble_2k_r128_minit_advect",          # §29 advection
+         "clip, adv, refit": "results/ensemble_2k_r128_minit_advect_refit"}
 GAIN = {"g1": {"TBNN": 1.6, "hybrid": 1.3}, "g2": {"TBNN": 2.5, "hybrid": 1.6}}
 RENAME = {"learned-2k_r128": "MiNNit", "hybrid-minitE": "TBNN shape x MInIT energy",
           "ablation-exactE": "TBNN shape x exact energy", "ablation-exactS": "exact shape x MiNNit energy"}
@@ -117,9 +119,14 @@ for k in order:
 PAIRS = [("exact", "hybrid x1.6"), ("hybrid x1.6", "TBNN shape x MInIT energy"),
          ("TBNN shape x MInIT energy", "hybrid"), ("hybrid", "MiNNit"),
          ("MInIT (fitted) [cell, eq-seed, clip]", "MiNNit"), ("MInIT (fitted) [cell, eq-seed, clip]", "hybrid"),
-         ("TBNN x2.5", "TBNN")]
+         ("TBNN x2.5", "TBNN"),
+         ("MInIT (fitted) [clip, adv]", "MInIT (fitted) [cell, eq-seed, clip]"),
+         ("MInIT (fitted) [clip, adv, refit]", "MInIT (fitted) [cell, eq-seed, clip]"),
+         ("MInIT (fitted) [clip, adv, refit]", "MiNNit")]
 print("\npaired, A - B (prof err / pdf W1 / |dtheta| / corr t<=10; negative = A closer, except corr):")
 for a, b in PAIRS:
+    if a not in rows or b not in rows:
+        continue
     common = sorted(set(rows[a]) & set(rows[b]))
     d = np.array([rows[a][m][[3, 4, 2, 5]] - rows[b][m][[3, 4, 2, 5]] for m in common])
     se = d.std(axis=0, ddof=1) / np.sqrt(len(d))

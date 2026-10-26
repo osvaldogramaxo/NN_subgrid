@@ -9,6 +9,7 @@ here on unseen realisations, against two targets:
           so the comparison stays like for like.
 
 MInIT gets the exact e_KH at t = 1 as its seed (as in the paper); MiNNit gets no seed.
+Rows with advection appear where results/minit_fair/coeffs_<tag>_cell_advect.json exists.
 Usage: python scratch/minit_fair_compare.py   (needs results/minit_fair/coeffs_*.json)
 """
 import json
@@ -76,6 +77,16 @@ def models_for(d, tag, net, cfg):
             out[f"MInIT {avg}, {name} ODE (seeded)"] = e.unsqueeze(-1) * beta_of(c)
         e = saturation_energy(eq.A_gamma * shear, rho, lam, eq.C)
         out[f"MInIT {avg}, equilibrium"] = e.unsqueeze(-1) * beta_of(eq)
+    # The cell form with the advective term the paper drops (FEASIBILITY §29), with the
+    # coefficients fitted without it and refitted with it (minit_calibrate --advect).
+    adv = Path(f"results/minit_fair/coeffs_{tag}_cell_advect.json")
+    if adv.exists():
+        for name, c in (("fitted", MInITCoefficients.load(f"results/minit_fair/coeffs_{tag}_cell.json")),
+                        ("refitted", MInITCoefficients.load(adv))):
+            e = evolve_e_series(d["e_dns"].clamp(min=0.0)[0], d["shear"], d["rho"], t,
+                                torch.tensor([c.A_gamma], dtype=torch.float64),
+                                torch.tensor([c.C], dtype=torch.float64), lam, 10, (d["vx"], d["vy"]))[0]
+            out[f"MInIT cell + advection, {name} ODE (seeded)"] = e.unsqueeze(-1) * beta_of(c)
     return out
 
 

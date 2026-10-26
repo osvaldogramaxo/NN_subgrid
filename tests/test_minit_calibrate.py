@@ -460,3 +460,26 @@ class TestSpectrumStyles:
 
         style = _MINIT_STYLE.get("something_new", {"color": "tab:purple", "ls": "-"})
         assert style["color"] and style["ls"]
+
+
+def test_advection_matches_closure_and_is_inert_without_gradients():
+    """--advect: a uniform field is unchanged; one interval equals the free run's first
+    interval (the two code paths split operators the same way); motion transports e."""
+    T, N = 3, 8
+    g = torch.Generator().manual_seed(1)
+    e0 = torch.rand(T, N, N, generator=g, dtype=DTYPE) + 0.1
+    shear = torch.rand(T, N, N, generator=g, dtype=DTYPE)
+    rho = torch.ones(T, N, N, dtype=DTYPE)
+    t = torch.tensor([0.0, 0.1, 0.2], dtype=DTYPE)
+    vel = (0.3 * torch.ones(T, N, N, dtype=DTYPE), -0.2 * torch.ones(T, N, N, dtype=DTYPE))
+    A, C = torch.tensor([0.5], dtype=DTYPE), torch.tensor([2.0], dtype=DTYPE)
+
+    flat = torch.ones_like(e0)
+    zero = torch.zeros_like(shear)
+    assert torch.allclose(evolve_e_series(flat[0], zero, rho, t, A, C, 1.0, 5, vel)[0],
+                          evolve_e_series(flat[0], zero, rho, t, A, C, 1.0, 5)[0])
+
+    free = evolve_e_series(e0[0], shear, rho, t, A, C, 1.0, 5, vel)[0]
+    one = one_step_series(e0, shear, rho, t, 0.5, 2.0, 1.0, 5, vel)
+    assert torch.allclose(one[0], free[1])
+    assert not torch.allclose(free[1], evolve_e_series(e0[0], shear, rho, t, A, C, 1.0, 5)[0][1])

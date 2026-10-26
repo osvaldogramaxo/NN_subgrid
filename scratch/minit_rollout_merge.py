@@ -15,7 +15,9 @@ ROOTS = {"abl": "results/ensemble_2k_r128_abl", "cell": "results/ensemble_2k_r12
          "x": "results/ensemble_2k_r128_minit_x", "cell, eq-seed": "results/ensemble_2k_r128_minit_eqseed",
          "cell, eq-seed, clip": "results/ensemble_2k_r128_minit_eqseed_clip",
          "hm": "results/ensemble_2k_r128_hybrid_minit",
-         "g1": "results/ensemble_2k_r128_gain/tg1.6_hg1.3", "g2": "results/ensemble_2k_r128_gain/tg2.5_hg1.6"}
+         "g1": "results/ensemble_2k_r128_gain/tg1.6_hg1.3", "g2": "results/ensemble_2k_r128_gain/tg2.5_hg1.6",
+         "clip, adv": "results/ensemble_2k_r128_minit_advect",          # §29 advection
+         "clip, adv, refit": "results/ensemble_2k_r128_minit_advect_refit"}
 GAIN = {"g1": {"TBNN": 1.6, "hybrid": 1.3}, "g2": {"TBNN": 2.5, "hybrid": 1.6}}   # §27 amplitude test
 ROOTS = {k: v for k, v in ROOTS.items() if glob.glob(v + "/*/metrics.json")}
 members = sorted(os.path.basename(p) for p in glob.glob(ROOTS["abl"] + "/*"))
@@ -84,3 +86,13 @@ if scaled:
             d = np.array([rows[k][m][0] - rows[ref][m][0] for m in common])
             print(f"  {k:<12} vs {ref:<28} {d.mean():+.3f} ± {d.std(ddof=1) / np.sqrt(len(d)):.3f}  "
                   f"(scaled better in {int((d < 0).sum())}/{len(d)})")
+
+base = "MInIT (fitted) [cell, eq-seed, clip]"
+adv = [k for k in order if k.startswith("MInIT (fitted) [clip, adv")]
+if adv:
+    print("\npaired, MInIT with advection - without (negative = advection closer to DNS):")
+    for k in adv:
+        common = sorted(set(rows[k]) & set(rows[base]))
+        d = np.array([rows[k][m][0] - rows[base][m][0] for m in common])
+        print(f"  {k:<40} {d.mean():+.3f} ± {d.std(ddof=1) / np.sqrt(len(d)):.3f}  "
+              f"(advection better in {int((d < 0).sum())}/{len(d)})")

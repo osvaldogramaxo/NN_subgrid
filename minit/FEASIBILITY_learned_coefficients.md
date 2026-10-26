@@ -1025,3 +1025,43 @@ fair MInIT − MiNNit: profile +0.031 ± 0.018, W1 +0.031 ± 0.007; fair MInIT �
    scaling still helps (hybrid ×1.6 best density distribution), so §27's amplitude conclusion stands,
    with a much smaller effect than on the spectrum. The gap to the exact stress is in the energy, not
    the shape: TBNN shape × exact energy matches the exact stress.
+
+
+---
+
+## 29. The advective term the paper drops (2026-10-26)
+
+The cell-by-cell port omitted $-\partial_i(v_i e_\text{KH})$ from Eq. 12. The paper drops it because its test
+averages over the plane, where the term cancels; applied cell by cell it does not cancel across the
+layer, where the roll-up carries sub-grid energy in $y$. Tested at 2048², $r = 128$, both a priori and in
+simulation, with first-order donor-cell upwinding (`advect_e_kh`, keeps $e \ge 0$), operator-split before
+each source update.
+
+**Calibration** (`minit_calibrate --advect`, coarse DNS velocity interpolated between snapshots; training
+realisation, t = 1–20, $A_\gamma = 0.14$): C = 3.82 (3.36 without); fit Eq. 25 0.85 (1.04). Stage split,
+pooled corr: exact e 0.948 → one interval 0.865 (0.891 without) → free-running **0.640** (0.578). Mean
+energy transfer −1.5e-3 against exact −9.1e-3 (without: +4.6e-3, wrong sign).
+**Unseen, per snapshot** (`scratch/minit_fair_compare.py`, 5 realisations, seeded): Eq. 25 / corr / amp —
+without 1.20 / 0.36 / 0.92; with advection, C = 3.36: 0.93 / 0.46 / 1.01; refitted C = 3.82: 0.97 / 0.46 / 0.81.
+Still behind MiNNit (0.75 / 0.66) and the equilibrium limit's correlation (0.61).
+
+**Rollouts** (fair setting: eq seed, clip; same 10 starts; `condor_ensemble_2k_minit_advect.sub` cluster
+1370699, `condor_ensemble_2k_minit_advect_refit.sub` cluster 1370700, 20/20 exit 0; no-closure control
+reproduces to 1e-13):
+
+| t = 1.5–10 | spectral | KE | θ/θ_DNS | profile | W1 | corr t ≤ 10 |
+|---|---|---|---|---|---|---|
+| without advection | **0.520** ± 0.017 | 1.15 | **0.57** | **0.412** | **0.233** | 0.49 |
+| advection, C = 3.36 | 0.578 ± 0.020 | 1.20 | 0.45 | 0.460 | 0.281 | 0.44 |
+| advection, refitted C = 3.82 | 0.618 ± 0.027 | 1.21 | 0.40 | 0.493 | 0.298 | 0.42 |
+
+Paired, with − without: spectral +0.058 ± 0.013 and +0.098 ± 0.018 (advection worse in 10/10 both);
+profile +0.048 ± 0.016 / +0.082 ± 0.015; |Δθ| +0.11 / +0.17.
+
+1. **Advection helps a priori and hurts in simulation.** In the coarse solver the closure acts less: more
+   kinetic-energy pile-up and slower mixing, toward no closure, and the refit (larger sink) makes it worse.
+2. Mean e at t = 10 is ~2.2× higher with advection with the same maximum, so the energy spreads out;
+   presumably out of the shear layers into quiet regions where a mostly-τxx stress does little. Not
+   checked directly. Donor-cell on a 16² grid is very diffusive, so this does not show that resolved
+   transport of $e_\text{KH}$ is wrong in principle, only that it does not rescue the equation here.
+3. The omitted term is therefore not why MInIT's equation trails MiNNit and the hybrid on structure (§28).

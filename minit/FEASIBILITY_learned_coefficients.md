@@ -980,3 +980,48 @@ but still +0.285 behind the §26 run (0/10).
 4. The exact stress at amplitude 1 gets 0.428, so the "needed" over-drive compensates for imperfect
    models, not a solver deficit per se. Open: measure the closures' actual in-rollout amplitude and
    dissipation, and whether a gain fitted at one filter transfers to others.
+
+## 28. Structure-sensitive scores: the exact stress is clearly best; the fair MInIT drops below MiNNit (2026-10-26)
+
+The log-spectral distance is blind to where energy sits (an unclosed run with two clean unmixed bands
+can look competitive on the spectrum). `scratch/rollout_structure_merge.py` rescores every r = 128 run
+from its saved trajectory (filtered DNS and runs every 0.1, t = 1–10), output in
+`results/structure_scores_r128.txt`: momentum thickness θ of the x-averaged $v_x$ (ratio to DNS and
+mean |ratio − 1|), RMS error of the x-averaged density profile, Wasserstein-1 between density
+distributions (both / std ρ_DNS), all over t = 1.5–10, and pointwise density correlation.
+
+**Predictability:** the two perturbed members (1%) of each start, no closure, still correlate 0.92 at
+t = 10 (0.99 at t = 6). The 16² coarse flow barely decorrelates, so pointwise correlation over the
+whole window is a valid closure score here (the DNS's own sensitivity is not measured).
+
+| run (mean of 10) | θ/θ_DNS | profile err | density W1 | corr t ≤ 10 | spectral (§27) |
+|---|---|---|---|---|---|
+| exact stress | 0.83 | **0.272** | 0.154 | **0.70** | 0.428 |
+| TBNN shape × exact energy | 0.79 | 0.275 | 0.136 | 0.69 | |
+| hybrid ×1.6 | 0.85 | 0.349 | 0.144 | 0.42 | 0.425 |
+| TBNN shape × MInIT energy | 0.78 | 0.362 | 0.176 | 0.50 | 0.415 |
+| hybrid | 0.81 | 0.379 | 0.183 | 0.42 | 0.525 |
+| MiNNit | 0.80 | 0.381 | 0.202 | 0.45 | 0.556 |
+| MInIT ODE, DNS seed | 0.63 | 0.388 | 0.217 | 0.47 | 0.471 |
+| MInIT ODE, eq seed, clip (fair) | 0.57 | 0.412 | 0.233 | 0.49 | 0.520 |
+| MInIT equilibrium, cell | 0.44 | 0.475 | 0.279 | 0.38 | 0.615 |
+| TBNN ×2.5 | 0.38 | 0.495 | 0.292 | 0.42 | 0.700 |
+| TBNN | 0.29 | 0.550 | 0.330 | 0.41 | 0.844 |
+| none | 0.28 | 0.559 | 0.349 | 0.41 | 0.917 |
+
+(x-averaged and paper-coefficient MInIT variants sit with "none".) Paired, A − B:
+exact − hybrid ×1.6: profile −0.078 ± 0.027, |Δθ| −0.141 ± 0.045, corr +0.28 ± 0.03;
+hybrid ×1.6 − TBNN shape × MInIT e: profile −0.012 ± 0.030 (tie), W1 −0.032 ± 0.005, corr −0.08 ± 0.03;
+fair MInIT − MiNNit: profile +0.031 ± 0.018, W1 +0.031 ± 0.007; fair MInIT − hybrid: W1 +0.050 ± 0.008.
+
+1. **The spectral "tie with the exact stress" was the spectrum's blindness.** On every structural score
+   the exact stress (and TBNN shape × exact energy) is clearly ahead of every model; its pointwise
+   correlation is 0.70 against ≤ 0.50. The best models match the exact stress's spectrum, not its flow.
+2. Every closure mixes the layers too slowly (θ below the DNS), the exact stress included (0.83). No
+   closure, the TBNN and the paper/x-averaged MInIT barely thicken the layers at all (θ ≈ 0.28–0.29).
+3. **The fair MInIT ODE loses to MiNNit and the hybrid on structure** (too-slow mixing, θ 0.57 vs 0.80),
+   reversing its spectral edge (§25). Its pointwise correlation is slightly higher, within noise.
+4. The top group (hybrid ×1.6, TBNN shape × MInIT e, hybrid, MiNNit) is close on the profile error;
+   scaling still helps (hybrid ×1.6 best density distribution), so §27's amplitude conclusion stands,
+   with a much smaller effect than on the spectrum. The gap to the exact stress is in the energy, not
+   the shape: TBNN shape × exact energy matches the exact stress.

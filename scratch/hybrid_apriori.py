@@ -5,8 +5,12 @@ Usage: python scratch/hybrid_apriori.py [r] [data_dir] [tbnn_ckpt] [minnit_ckpt]
 With MInIT coefficients and the run's reduction cache, also scores TBNN shape x MInIT's
 evolved energy (FEASIBILITY §26): the cell-by-cell ODE integrated along the filtered DNS
 from t = 1, seeded with the exact energy or at its own equilibrium (as in the rollouts).
+Also scores the TBNN and hybrid with their stress scaled by the rollout gains (FEASIBILITY §27).
+APRIORI_WINDOW="t0,t1,stride" sets the snapshots scored (default "1,inf,10": t = 1, 2, ... 20;
+"1.5,10,5" is the rollout window t = 1.5-10 every 0.5).
 """
 import glob
+import os
 import sys
 from pathlib import Path
 
@@ -29,9 +33,13 @@ ckpt_l = sys.argv[4] if len(sys.argv) > 4 else (
 model, ck = CRMHD_TBNN.from_checkpoint(ckpt_t, device="cpu", dtype=DT)
 model.eval()
 
+t0, t1, stride = os.environ.get("APRIORI_WINDOW", "1,inf,10").split(",")
 files = sorted(glob.glob(f"{data_dir}/h*.h5"))
-snaps = [s for s in (read_snapshot(f) for f in files[::10]) if s["t"] >= 1.0 - 1e-9]
+snaps = [s for s in (read_snapshot(f) for f in files[::int(stride)])
+         if float(t0) - 1e-9 <= s["t"] <= float(t1) + 1e-9]
+GAINS = {"TBNN": (1.6, 2.5), "hybrid": (1.3, 1.6)}   # condor_ensemble_2k_gain.sub
 taus = {"TBNN": [], "MiNNit": [], "hybrid": [], "TBNN shape x exact e": [], "exact shape x MiNNit e": []}
+taus.update({f"{m} x{g}": [] for m, gs in GAINS.items() for g in gs})
 e_minit = {}
 if len(sys.argv) > 6:
     from src.minit import LAMBDA_OVER_DELTA, MInITCoefficients, saturation_energy  # noqa: E402
@@ -69,6 +77,14 @@ for snap in snaps:
         taus["hybrid"].append(pick(hy(prims)[0]))
         taus["TBNN shape x exact e"].append(pick(abl_e(prims)[0]))
         taus["exact shape x MiNNit e"].append(pick(abl_s(prims)[0]))
+        for g in GAINS["TBNN"]:
+            tb_g = TBNNSGSClosure(model, ck["inv_mean"], ck["inv_std"], ck["thermo_mean"],
+                                  ck["thermo_std"], dx, dy, gain=g)
+            taus[f"TBNN x{g}"].append(pick(tb_g(prims)[0]))
+        for g in GAINS["hybrid"]:
+            le_g = LearnedMInITClosure.load(ckpt_l, dx, dy)
+            le_g.cfg.gain = g
+            taus[f"hybrid x{g}"].append(pick(HybridClosure(tb, le_g)(prims)[0]))
         for tag, es in e_minit.items():
             e = es[int(torch.argmin((red["t"] - snap["t"]).abs()))]
             tau_m = torch.zeros(*e.shape, 4, 4, dtype=DT)
@@ -86,7 +102,7 @@ for snap in snaps:
 d = {"tau": torch.stack(exact), "S": torch.stack(S_all)}
 d["e_dns"] = 0.5 * (d["tau"][..., 0] + d["tau"][..., 1])
 k_hi = Nx // 4
-print(f"r={r}, {len(snaps)} snapshots of {data_dir}, hybrid fallback cells "
+print(f"r={r}, {len(snaps)} snapshots of {data_dir} (t = {snaps[0]['t']:g}-{snaps[-1]['t']:g}), hybrid fallback cells "
       f"{100 * sum(fb) / len(fb):.1f}%")
 print(f"{'model':<34} {'amp':>6} {'corr':>7} {'Eq25':>7} {'Pi/Pi_ex':>9} {'hi-k':>6} "
       f"{'hi-k ex':>8}  amp 1st->2nd")

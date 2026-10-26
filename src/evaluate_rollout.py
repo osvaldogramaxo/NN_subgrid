@@ -641,6 +641,7 @@ class TBNNSGSClosure:
     backscatter_clip : str or None — None (allow backscatter), "zero", or "project"
     backscatter_fraction : float — fraction of backscatter to retain (0 = strict clip)
     tau_smooth_passes : int — (1,2,1)/4 low-pass applications on tau before use
+    gain : float — multiplies tau before the realizability clip (amplitude test)
     """
 
     def __init__(
@@ -658,6 +659,7 @@ class TBNNSGSClosure:
         backscatter_clip: str | None = None,
         backscatter_fraction: float = 0.0,
         tau_smooth_passes: int = 0,
+        gain: float = 1.0,
     ):
         self.model = model
         self.model.eval()
@@ -674,6 +676,7 @@ class TBNNSGSClosure:
         self.backscatter_clip = backscatter_clip
         self.backscatter_fraction = backscatter_fraction
         self.tau_smooth_passes = tau_smooth_passes
+        self.gain = gain
 
     @torch.no_grad()
     def __call__(self, prims: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -710,7 +713,7 @@ class TBNNSGSClosure:
 
         # Forward pass → τ_⊥^{μν}
         delta_T, _, _ = self.model_f32(inv_norm, thermo_norm, basis)
-        tau_perp = delta_T.to(prims.dtype).reshape(Ny, Nx, 4, 4)
+        tau_perp = self.gain * delta_T.to(prims.dtype).reshape(Ny, Nx, 4, 4)
 
         # Realizability clipping
         tau_perp = clip_sgs_tensor(
@@ -1028,6 +1031,7 @@ def evaluate_rollout(
     minit_clip: bool = False,
     learned_coeff: tuple[str, ...] = (),
     learned_gain: float = 1.0,
+    tbnn_gain: float = 1.0,
     hybrid_coeff: str | None = None,
     hybrid_clip: bool = True,
     hybrid_ablations: bool = False,
@@ -1190,6 +1194,7 @@ def evaluate_rollout(
                 backscatter_clip=backscatter_clip,
                 backscatter_fraction=backscatter_fraction,
                 tau_smooth_passes=tau_smooth_passes,
+                gain=tbnn_gain,
             )
             ok_tbnn = _safe_evolve(
                 solver_tbnn, "tbnn",
@@ -1201,6 +1206,8 @@ def evaluate_rollout(
             )
         else:
             print("  Coupling: legacy source-term")
+            if tbnn_gain != 1.0:
+                raise ValueError("--tbnn-gain requires --sgs-coupling flux")
             if backscatter_clip is not None:
                 raise ValueError(
                     "--backscatter-clip requires --sgs-coupling flux; the legacy "
@@ -1993,6 +2000,9 @@ if __name__ == "__main__":
     parser.add_argument("--hybrid-no-clip", dest="hybrid_clip", action="store_false",
                         help="Disable the realizability clip after the hybrid's rescale "
                              "(the pre-fix behaviour; it diverged in 1 of 14 rollouts).")
+    parser.add_argument("--tbnn-gain", type=float, default=1.0,
+                        help="Multiply the TBNN row's stress by this factor before its "
+                             "realizability clip (amplitude test; the hybrid's shape is unaffected).")
     parser.add_argument("--learned-gain", type=float, default=1.0,
                         help="Multiply the learned e_KH by this factor. The a-priori "
                              "optimum is ~0.96, so this is not calibration: it "
@@ -2073,6 +2083,7 @@ if __name__ == "__main__":
         minit_clip=args.minit_clip,
         learned_coeff=tuple(args.learned_coeff or ()),
         learned_gain=args.learned_gain,
+        tbnn_gain=args.tbnn_gain,
         hybrid_coeff=args.hybrid_coeff,
         hybrid_clip=args.hybrid_clip,
         hybrid_ablations=args.hybrid_ablations,

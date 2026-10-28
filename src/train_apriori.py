@@ -1232,7 +1232,8 @@ def plot_pred_vs_truth(
 
         # Parity scatter plot
         ax3 = axes[row_idx, 3]
-        sub = slice(None, None, 8)
+        # Thin to <= ~4096 points; a fixed stride of 8 left 4 points on a 16x16 grid (r = 128)
+        sub = slice(None, None, max(1, int((truth.size / 4096) ** 0.5)))
         t_flat = truth[sub, sub].flatten()
         p_flat = pred[sub, sub].flatten()
         ax3.scatter(t_flat, p_flat, alpha=0.3, s=8, c="royalblue", edgecolors="none")

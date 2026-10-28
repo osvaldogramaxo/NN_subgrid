@@ -69,6 +69,24 @@ Next steps:
       (85% with E0-E2). The 12 tensors span only rank 4. NOT true in 3D or with B: there
       the a-free set is not complete (Pope needs 10 tensors for sigma, omega alone), so
       revisit before the MHD step.
+      RESULT (28/10, trained 23 min, best epoch 343): DOES NOT FIX THE COLLAPSE.
+      - A priori, mean over s1-s5 (results/dns2k/noaccel_apriori_s*.log):
+        TBNN amp 0.72 -> 0.63, corr 0.82 -> 0.77, Eq25 0.75 -> 0.92.
+        The shape is unchanged: hybrid corr 0.860 / Eq25 0.492 (was 0.861 / 0.491),
+        TBNN shape x exact e Eq25 0.258 (was ~0.25).
+      - Energy on simulation states (results/tbnn_energy_diag_noaccel/summary.txt): DNS
+        0.56-0.65, no-closure 0.18-0.28 of exact. As bad as before, slightly worse.
+      - The second cause is strain extrapolation. The no-closure run keeps its strain in
+        thin, sharp shear sheets: 62% of its rho lam^2 |S|^2 sits in cells above the DNS's
+        97th percentile (13% of cells, vs 3% in DNS). There, e/(rho lam^2 |S|^2) relative to
+        the DNS-wide exact value is MiNNit 0.86, TBNN old 0.35, new 0.20. Even inside the DNS
+        range, the TBNN's coefficient falls with strain (0.9 -> 0.5-0.65), while exact and
+        MiNNit stay ~1. MiNNit has e = exp(g) rho lam^2 |S|^2 built in, so it scales with
+        strain out of distribution; the TBNN must learn the scaling and does not extrapolate.
+      Next idea: build the same scaling into the TBNN (tau = rho lam^2 |S|^2 x sum g_n E_n,
+      with normalised E_n). That is close to the hybrid, which conclusion 1 already favours.
+      Rollouts (condor 1371455/6) are still running; they test whether the new shape keeps
+      the hybrids' scores.
    b) Loss (1-2 days, one condor retrain): add a log-energy term
       (log tr tau_pred - log tr tau_exact)^2 to the TBNN loss (src/losses.py). Accept only
       if rollouts improve: refit, gain and the Eq.25 loss all helped a priori and hurt

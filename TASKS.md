@@ -50,6 +50,14 @@ Next steps:
       - Reading: the filtered DNS carries pressure-gradient / compression signatures of the
         unresolved turbulence that the 16x16 solver does not produce. A train/test shift
         in the inputs, not a loss problem, so b) alone would not fix it.
+      - Why the acceleration (28/10): a comes from the Euler equation, so it is grad p / rho h.
+        Filtered-DNS pressure fluctuates 35% (vortex cores, corr(p, Q) -0.46); |a| tracks
+        e_exact (corr +0.48). The no-closure 16x16 run never rolls up (rms vy 0.003 vs DNS
+        0.186) and its pressure flattens from 5% to 1%, so |a| is 56x smaller. The exact-
+        stress run rolls up (vy 0.145, p 28%), but its |a| is still half the DNS value. The
+        cue is circular: the TBNN only predicts stress where roll-up has already happened,
+        but in the coarse run the roll-up only happens if the closure drives it.
+        MiNNit keys on strain, which the laminar shear already has.
       Next (replaces b as the first try, 1 condor retrain): TBNN without the acceleration
       invariants, theta and Mach (sigma/omega invariants only, like MiNNit); score a priori,
       rerun this diagnostic, then rollouts. c) is now better motivated: it trains on the

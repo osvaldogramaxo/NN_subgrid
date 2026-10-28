@@ -61,3 +61,4 @@ scratch/*
 !scratch/reduce_dns_cache.py
 !scratch/minit_fair_compare.py
 !scratch/minit_rollout_merge.py
+!scratch/tbnn_energy_diagnosis.py

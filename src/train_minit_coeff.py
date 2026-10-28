@@ -32,7 +32,8 @@ import torch
 import torch.nn.functional as F
 
 from src.evaluate_apriori import highk_fraction
-from src.minit_calibrate import fit_beta_lsq, l2_norm_paper
+from src.minit import trace_energy, trace_scale
+from src.minit_calibrate import fit_beta_lsq, fit_beta_trace, l2_norm_paper
 from src.minit_learned import (
     E_FLOOR,
     CoefficientNet,
@@ -42,10 +43,14 @@ from src.minit_learned import (
 )
 
 
-def load_reduction(path: Path, t_min: float) -> dict:
+def load_reduction(path: Path, t_min: float, energy: str = "lab") -> dict:
+    """A cached DNS reduction from ``t_min`` on, with e_dns in the given definition."""
     d = torch.load(path, map_location="cpu", weights_only=False)["data"]
     keep = d["t"] >= t_min
-    return {k: (v[keep] if v.shape[0] == keep.shape[0] else v) for k, v in d.items()}
+    d = {k: (v[keep] if v.shape[0] == keep.shape[0] else v) for k, v in d.items()}
+    if energy == "trace":
+        d["e_dns"] = trace_energy(d["tau"], d["vx"], d["vy"])
+    return d
 
 
 def prepare(d: dict, lambda_KH: float, dx: float, dy: float):
@@ -58,23 +63,28 @@ def prepare(d: dict, lambda_KH: float, dx: float, dy: float):
 def score(net, cfg, d, dx, dy, beta, stride=10, k_hi=16) -> dict:
     with torch.no_grad():
         e_pred = predict_e_kh(net, cfg, d["rho"], d["vx"], d["vy"], dx, dy)
-    return score_e(e_pred, d, beta, stride, k_hi)
+    return score_e(e_pred, d, beta, stride, k_hi, energy=cfg.energy)
 
 
-def score_e(e_pred, d, beta, stride=10, k_hi=16) -> dict:
-    """Score ``tau = beta_ij e_pred`` against the exact stress.
+def score_e(e_pred, d, beta, stride=10, k_hi=16, energy="lab") -> dict:
+    """Score ``tau = beta_ij e_pred`` (x the per-cell trace scale for energy = "trace").
 
     ``src.evaluate_apriori``-style aggregation, so rows line up with its output.
     ``l2_eq25`` is the paper's Eq. (25), summed over space and components per
     snapshot, then RMS over time as the paper does for Fig. 13.
     """
-    return score_tau(e_pred.unsqueeze(-1) * beta, d, stride, k_hi)
+    if energy == "trace":
+        beta = beta * trace_scale(*beta.tolist(), d["vx"], d["vy"]).unsqueeze(-1)
+    return score_tau(e_pred.unsqueeze(-1) * beta, d, stride, k_hi, energy)
 
 
-def score_tau(tau_m, d, stride=10, k_hi=16) -> dict:
-    """As :func:`score_e`, for any predicted ``[tau^xx, tau^yy, tau^xy]`` series."""
+def score_tau(tau_m, d, stride=10, k_hi=16, energy="lab") -> dict:
+    """As :func:`score_e`, for any predicted ``[tau^xx, tau^yy, tau^xy]`` series.
+
+    ``energy`` only sets how R²(e) reads e off tau_m; it must match ``d["e_dns"]``."""
     tau_ex, S = d["tau"], d["S"]
-    e_pred = 0.5 * (tau_m[..., 0] + tau_m[..., 1])
+    e_pred = (trace_energy(tau_m, d["vx"], d["vy"]) if energy == "trace"
+              else 0.5 * (tau_m[..., 0] + tau_m[..., 1]))
 
     amp, corr, pi, sign, hik, hik_ex, rl2, eq25 = [], [], [], [], [], [], [], []
     for i in range(0, tau_ex.shape[0], stride):
@@ -114,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--test-cache", default="results/minit/dns_reduction_s1.pt")
     ap.add_argument("--output-mode", choices=["residual", "direct"], default="residual")
     ap.add_argument("--width", type=int, default=32)
+    ap.add_argument("--energy", choices=["lab", "trace"], default="lab",
+                    help="e_KH definition: lab ½(tau^xx + tau^yy) or covariant ½ tau^mu_mu (TASKS 28/10)")
     ap.add_argument("--eq25-weight", type=float, default=0.0,
                     help="add w * mean_snapshots(Eq.25^2) on the stress to the log-MSE "
                          "loss. log-MSE weights every cell equally; Eq. 25 is dominated "
@@ -140,7 +152,9 @@ def main(argv: list[str] | None = None) -> int:
     dev = torch.device(args.device)
     tag = args.tag or args.output_mode
 
-    tr = load_reduction(Path(args.train_cache), args.t_min)
+    if args.energy == "trace" and args.eq25_weight > 0:
+        raise ValueError("--eq25-weight is not implemented for --energy trace")
+    tr = load_reduction(Path(args.train_cache), args.t_min, args.energy)
     Ny, Nx = tr["rho"].shape[-2:]
     dx, dy = 1.0 / Nx, 1.0 / Ny
     lambda_KH = 15.8 * dx          # the coarse cell is the filter box
@@ -148,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     # beta from training data only -- no test information reaches the model.
     e_tr_all = tr["e_dns"].clamp(min=0.0)
     bfit = fit_beta_lsq(e_tr_all, tr["tau"])
+    if args.energy == "trace":
+        bfit = fit_beta_trace(e_tr_all, tr["tau"], tr["vx"], tr["vy"], bfit)
     beta = torch.tensor([bfit["beta_xx"], bfit["beta_yy"], bfit["beta_xy"]],
                         dtype=tr["tau"].dtype)
     print(f"beta (lsq, train only): {  {k: round(v, 4) for k, v in bfit.items()} }")
@@ -228,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = LearnedMInITConfig(
         lambda_KH=lambda_KH,
         beta_xx=bfit["beta_xx"], beta_yy=bfit["beta_yy"], beta_xy=bfit["beta_xy"],
-        output_mode=args.output_mode, width=args.width,
+        output_mode=args.output_mode, width=args.width, energy=args.energy,
         log_e_mean=float(tgt_m), log_e_std=float(tgt_s),
     )
 
@@ -257,13 +273,13 @@ def main(argv: list[str] | None = None) -> int:
         if not Path(cache).exists():
             print(f"{name:<30} -- cache {cache} missing, skipped")
             continue
-        d = load_reduction(Path(cache), args.t_min)
+        d = load_reduction(Path(cache), args.t_min, args.energy)
         rows = {name: score(net, cfg, d, dx, dy, beta, k_hi=k_hi)}
         if "unseen" in name:
             e_eq = k_eq * d["rho"] * lambda_KH**2 * d["shear"] ** 2
             rows["  oracle e (ansatz ceiling)"] = score_e(
-                d["e_dns"].clamp(min=0.0), d, beta, k_hi=k_hi)
-            rows["  MInIT equilibrium, global k"] = score_e(e_eq, d, beta, k_hi=k_hi)
+                d["e_dns"].clamp(min=0.0), d, beta, k_hi=k_hi, energy=args.energy)
+            rows["  MInIT equilibrium, global k"] = score_e(e_eq, d, beta, k_hi=k_hi, energy=args.energy)
         for label, sc in rows.items():
             results[label.strip()] = sc
             print(f"{label:<30} {sc['amp']:>6.3f} {sc['corr']:>+7.3f} {sc['l2_eq25']:>7.3f} "

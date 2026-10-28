@@ -1416,6 +1416,8 @@ def evaluate_rollout(
                 g = growth_rate(mp[..., 1], mp[..., 2], dx, dy, coeffs.A_gamma,
                                 mode=minit_shear_mode)
                 e_seed_field = saturation_energy(g, mp[..., 0], closure.lambda_KH, coeffs.C)
+            elif minit_seed == "dns":       # in this variant's e_KH definition
+                e_seed_field = subgrid_energy_from_stress(tau0, coeffs.energy).to(device)
             closure.initialize(solver_minit.prims, e_KH=e_seed_field)
 
             ok_minit = _safe_evolve(

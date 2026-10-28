@@ -45,11 +45,11 @@ if model.shape_only:    # a shape network has no stress of its own; only its hyb
         del taus[k]
 e_minit = {}
 if len(sys.argv) > 6:
-    from src.minit import LAMBDA_OVER_DELTA, MInITCoefficients, saturation_energy  # noqa: E402
+    from src.minit import LAMBDA_OVER_DELTA, MInITCoefficients, assemble_tau, saturation_energy  # noqa: E402
     from src.minit_calibrate import evolve_e_series  # noqa: E402
     from src.train_minit_coeff import load_reduction  # noqa: E402
     mc = MInITCoefficients.load(sys.argv[5])
-    red = load_reduction(Path(sys.argv[6]), 1.0)
+    red = load_reduction(Path(sys.argv[6]), 1.0, mc.energy)
     lam = LAMBDA_OVER_DELTA / red["rho"].shape[-1]
     A, C = (torch.tensor([v], dtype=DT) for v in (mc.A_gamma, mc.C))
     seeds = {"DNS seed": red["e_dns"][0].clamp(min=0.0),
@@ -58,7 +58,6 @@ if len(sys.argv) > 6:
         e_minit[tag] = evolve_e_series(e0, red["shear"], red["rho"], red["t"], A, C, lam, 10)[0]
         taus[f"TBNN shape x MInIT e ({tag})"] = []
     taus["MInIT ODE (eq. seed)"] = []
-    beta_m = torch.tensor([mc.beta_xx, mc.beta_yy, mc.beta_xy], dtype=DT)
 exact, S_all, fb = [], [], []
 for snap in snaps:
     fine = [torch.tensor(snap[k], dtype=DT) for k in ("rho", "vx", "vy", "p")]
@@ -96,7 +95,7 @@ for snap in snaps:
             hm = HybridClosure(tb, le, energy_closure=lambda _p, t=tau_m: (t, None))
             taus[f"TBNN shape x MInIT e ({tag})"].append(pick(hm(prims)[0]))
             if tag == "eq. seed":
-                taus["MInIT ODE (eq. seed)"].append(e.unsqueeze(-1) * beta_m)
+                taus["MInIT ODE (eq. seed)"].append(pick(assemble_tau(e, prims, mc)))
     fb.append(hy.fallback_fraction)
     exact.append(pick(tau_ex))
     a, b_ = periodic_gradient_2d(c["vx_tilde"], dx, dy, order=4)

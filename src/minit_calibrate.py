@@ -97,6 +97,8 @@ from src.minit import (
     row_mean,
     saturation_energy,
     subgrid_energy_from_stress,
+    trace_energy,
+    trace_scale,
 )
 
 
@@ -455,8 +457,12 @@ def scan_A_C(
     substeps: int = 10,
     fix_A_gamma: float | None = None,
     vel: tuple[torch.Tensor, torch.Tensor] | None = None,
+    scale: torch.Tensor | None = None,
 ) -> dict:
     r"""Minimise the Eq. (25) norm over ``(A_gamma, C)`` by nested grid scan.
+
+    ``scale`` (T, Ny, Nx), if given, multiplies the model stress cell by cell: the
+    :func:`src.minit.trace_scale` of the ``energy = "trace"`` definition.
 
     A scan rather than a gradient method because the objective is cheap once
     the parameter batch is vectorised, the domain is two-dimensional and
@@ -494,7 +500,8 @@ def scan_A_C(
         for k, e_k in iter_e_series(
             e_dns[0], shear, rho, times, flat_A, flat_C, lambda_KH, substeps, vel,
         ):
-            model_flat = (e_k.unsqueeze(-1) * beta_vec).flatten(start_dim=-3)
+            b_k = beta_vec if scale is None else beta_vec * scale[k].unsqueeze(-1)
+            model_flat = (e_k.unsqueeze(-1) * b_k).flatten(start_dim=-3)
             l2_sq_sum += l2_norm_paper(sim_flat[k].unsqueeze(0), model_flat) ** 2
 
         # RMS over time of the per-time norm, as in Sec. 4.3.3.
@@ -554,6 +561,20 @@ def _boundary_pinned(
     return out
 
 
+def fit_beta_trace(e, tau, vx, vy, beta: dict[str, float], iters: int = 5) -> dict[str, float]:
+    r"""beta for ``energy = "trace"``, where the model is tau^ij = beta_ij e trace_scale(beta).
+
+    Regress on e * trace_scale and iterate from ``beta`` (the plain least-squares fit).
+    trace_scale is invariant to beta's overall size, so it is normalised to
+    beta_xx + beta_yy = 2 each pass.
+    """
+    norm = lambda b: {k: v * 2.0 / (b["beta_xx"] + b["beta_yy"]) for k, v in b.items()}
+    for _ in range(iters):
+        beta = norm(beta)
+        beta = fit_beta_lsq(e * trace_scale(beta["beta_xx"], beta["beta_yy"], beta["beta_xy"], vx, vy), tau)
+    return norm(beta)
+
+
 def fit_equilibrium(
     tau: torch.Tensor,
     shear: torch.Tensor,
@@ -564,6 +585,7 @@ def fit_equilibrium(
     C_range: tuple[float, float] = (0.1, 60.0),
     n_C: int = 201,
     rounds: int = 3,
+    scale: torch.Tensor | None = None,
 ) -> dict:
     r"""Fit the equilibrium limit of MInIT, in which the ODE is replaced by its fixed point.
 
@@ -597,7 +619,8 @@ def fit_equilibrium(
                 A_gamma * shear[k].unsqueeze(0), rho[k].unsqueeze(0),
                 lambda_KH, axis.view(-1, 1, 1),
             )
-            model_flat = (e_eq.unsqueeze(-1) * beta_vec).flatten(start_dim=-3)
+            b_k = beta_vec if scale is None else beta_vec * scale[k].unsqueeze(-1)
+            model_flat = (e_eq.unsqueeze(-1) * b_k).flatten(start_dim=-3)
             l2_sq += l2_norm_paper(sim_flat[k].unsqueeze(0), model_flat) ** 2
 
         score = (l2_sq / tau.shape[0]).sqrt()
@@ -751,6 +774,9 @@ def main(argv: list[str] | None = None) -> int:
                          "rate of the x-averaged shear profile, and e_KH, rho and the "
                          "exact stress all averaged over x before fitting and scoring.")
     ap.add_argument("--substeps", type=int, default=10)
+    ap.add_argument("--energy", choices=["lab", "trace"], default="lab",
+                    help="e_KH definition (MInITCoefficients.energy): lab ½(tau^xx + tau^yy), "
+                         "or the covariant ½ tau^mu_mu (TASKS 28/10)")
     ap.add_argument("--advect", action="store_true",
                     help="include the advective term -d_i(v_i e_KH) the paper drops, "
                          "with the coarse DNS velocity (cell form only)")
@@ -810,6 +836,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.advect and args.average == "x":
         raise ValueError("advection cancels in the x-averaged model; --advect needs --average cell")
+    trace = args.energy == "trace"
+    if trace:
+        if args.average == "x":
+            raise ValueError("--energy trace rescales cell by cell; use --average cell")
+        e_dns = trace_energy(tau_exact, sel["vx"], sel["vy"])
+        print("Energy: e_KH = ½ tau^mu_mu (covariant)")
+    scale_of = lambda c: (trace_scale(c.beta_xx, c.beta_yy, c.beta_xy, sel["vx"], sel["vy"])
+                          if trace else None)
     vel = (sel["vx"], sel["vy"]) if args.advect else None
 
     if args.average == "x":
@@ -844,6 +878,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  published (Table 2): beta_xx=0.74 beta_yy=0.64 beta_xy=-0.01")
 
     beta = beta_lsq if args.beta_estimator == "lsq" else beta_block
+    if trace:
+        beta = fit_beta_trace(e_dns, tau_exact, sel["vx"], sel["vy"], beta)
+        print(f"  trace-consistent   : {beta}")
+    beta_s = scale_of(MInITCoefficients(**beta)) if trace else None
     trace_res = beta["beta_xx"] + beta["beta_yy"] - 2.0
     print(f"  trace residual (beta_xx+beta_yy-2) = {trace_res:+.4f}  "
           f"[published: {0.74 + 0.64 + 0.61 - 2.0:+.4f} in 3D]")
@@ -856,7 +894,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         common = dict(
             A_range=tuple(args.A_range), C_range=tuple(args.C_range),
-            substeps=args.substeps, vel=vel,
+            substeps=args.substeps, vel=vel, scale=beta_s,
         )
         scan = scan_A_C(e_dns, tau_exact, shear, sel["rho"], t, beta, lambda_KH, **common)
 
@@ -901,7 +939,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.paper_only:
         eq_fit = fit_equilibrium(
             tau_exact, shear, sel["rho"], beta, lambda_KH,
-            A_gamma=A_GAMMA_PAPER, C_range=tuple(args.C_range),
+            A_gamma=A_GAMMA_PAPER, C_range=tuple(args.C_range), scale=beta_s,
         )
         print(f"\n--- equilibrium limit (e_KH = e_sat, no ODE) ---")
         print(f"  A_gamma/C = {eq_fit['ratio']:.5f}  (A_gamma={A_GAMMA_PAPER}, "
@@ -909,7 +947,7 @@ def main(argv: list[str] | None = None) -> int:
 
     coeffs_fitted = MInITCoefficients(
         beta_xx=beta["beta_xx"], beta_yy=beta["beta_yy"], beta_xy=beta["beta_xy"],
-        A_gamma=fitted["A_gamma"], C=fitted["C"],
+        A_gamma=fitted["A_gamma"], C=fitted["C"], energy=args.energy,
     )
     if args.normalize_beta:
         coeffs_fitted = coeffs_fitted.normalized()
@@ -917,12 +955,13 @@ def main(argv: list[str] | None = None) -> int:
               f"xx={coeffs_fitted.beta_xx:.4f} yy={coeffs_fitted.beta_yy:.4f}")
 
     # --- Stage 4: a-priori scoring ---------------------------------------
-    coeffs_paper = MInITCoefficients.paper()
+    coeffs_paper = MInITCoefficients(energy=args.energy)    # published values
     variants = {"fitted": coeffs_fitted, "paper": coeffs_paper}
     if eq_fit is not None:
         coeffs_eq = MInITCoefficients(
             beta_xx=coeffs_fitted.beta_xx, beta_yy=coeffs_fitted.beta_yy,
             beta_xy=coeffs_fitted.beta_xy, A_gamma=A_GAMMA_PAPER, C=eq_fit["C"],
+            energy=args.energy,
         )
         variants["equilibrium"] = coeffs_eq
         coeffs_eq.save(Path(args.coeff_out).with_name(
@@ -933,6 +972,11 @@ def main(argv: list[str] | None = None) -> int:
         name: torch.tensor([c.beta_xx, c.beta_yy, c.beta_xy], dtype=e_dns.dtype)
         for name, c in variants.items()
     }
+    scales = {name: scale_of(c) for name, c in variants.items()}
+
+    def bf(name, sl=slice(None)):
+        """beta of a variant, times its per-cell trace scale (T, Ny, Nx, 3) if energy = trace."""
+        return beta_vec[name] if scales[name] is None else beta_vec[name] * scales[name][sl].unsqueeze(-1)
 
     e_model = {}
     for name, c in variants.items():
@@ -962,9 +1006,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         stages = {
-            "oracle_e": (e_dns.unsqueeze(-1) * beta_vec[name], tau_exact),
-            "one_step": (e_one.unsqueeze(-1) * beta_vec[name], tau_exact[1:]),
-            "full": (e_model[name].unsqueeze(-1) * beta_vec[name], tau_exact),
+            "oracle_e": (e_dns.unsqueeze(-1) * bf(name), tau_exact),
+            "one_step": (e_one.unsqueeze(-1) * bf(name, slice(1, None)), tau_exact[1:]),
+            "full": (e_model[name].unsqueeze(-1) * bf(name), tau_exact),
         }
         scores[name] = {k: score_tau(*v) for k, v in stages.items()}
 
@@ -978,7 +1022,7 @@ def main(argv: list[str] | None = None) -> int:
         # wrong from the start or drifts away from an initially good field.
         per_t = np.array([
             score_tau(
-                e_model[name][k].unsqueeze(-1) * beta_vec[name], tau_exact[k],
+                e_model[name][k].unsqueeze(-1) * bf(name, k), tau_exact[k],
             )["corr"]
             for k in range(len(t))
         ])
@@ -996,7 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  exact  : {float(pi_exact.mean()):+.6e}")
     pi_curves = []
     for name in variants:
-        pi_m = energy_transfer(e_model[name].unsqueeze(-1) * beta_vec[name], S)
+        pi_m = energy_transfer(e_model[name].unsqueeze(-1) * bf(name), S)
         ratio = float(pi_m.mean() / pi_exact.mean()) if abs(float(pi_exact.mean())) > 0 else float("nan")
         print(f"  {name:7s}: {float(pi_m.mean()):+.6e}   ({ratio:+.3f} x exact)")
         scores[name]["pi_ratio"] = ratio
@@ -1049,7 +1093,7 @@ def main(argv: list[str] | None = None) -> int:
         "pi_curves": pi_curves,
         "corr_series": corr_series,
         "corr_oracle": np.array([
-            score_tau(e_dns[k].unsqueeze(-1) * beta_vec["fitted"], tau_exact[k])["corr"]
+            score_tau(e_dns[k].unsqueeze(-1) * bf("fitted", k), tau_exact[k])["corr"]
             for k in range(len(t))
         ]),
     })

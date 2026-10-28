@@ -122,6 +122,10 @@ class MInITCoefficients:
     beta_xx, beta_yy, beta_xy : Reynolds closure coefficients (Eq. 16b).
     A_gamma : constant relating resolved shear to growth rate (Eq. 23).
     C : Kolmogorov dissipation constant (Eq. 13).
+    energy : what e_KH means. ``"lab"`` (default, every fit before 28/10/2026):
+        e = ½(τ^xx + τ^yy) in lab components, the port's literal transcription of the
+        Newtonian e = ½ρ Σ R_ii. ``"trace"``: e = ½ τ^μ_μ, the covariant reading, equal
+        to the Newtonian e in the fluid's rest frame; about 6% below "lab" at |v| ≤ 0.4.
     """
 
     beta_xx: float = BETA_KH_PAPER["xx"]
@@ -129,6 +133,7 @@ class MInITCoefficients:
     beta_xy: float = BETA_KH_PAPER["xy"]
     A_gamma: float = A_GAMMA_PAPER
     C: float = C_PAPER
+    energy: str = "lab"
 
     @classmethod
     def paper(cls) -> "MInITCoefficients":
@@ -142,7 +147,7 @@ class MInITCoefficients:
             payload = json.load(fh)
         fitted = payload.get("coefficients", payload)
         fields = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: float(v) for k, v in fitted.items() if k in fields})
+        return cls(**{k: (v if k == "energy" else float(v)) for k, v in fitted.items() if k in fields})
 
     def save(self, path: str | Path) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -326,6 +331,15 @@ def advect_e_kh(
     return (e_KH - dt * div).clamp(min=0.0)
 
 
+def trace_scale(bxx, byy, bxy, vx: torch.Tensor, vy: torch.Tensor) -> torch.Tensor:
+    r"""Per-cell factor making ½ τ^μ_μ = e for τ^ij = β_ij e (energy = "trace").
+
+    The trace per unit e of the transverse β-shaped stress is β_ii - v_i v_j β_ij
+    (>= ~1.7 here at |v| <= 0.4), so the factor is 2 / that: bounded, no fallback.
+    """
+    return 2.0 / ((bxx + byy) - (vx * vx * bxx + vy * vy * byy + 2.0 * vx * vy * bxy))
+
+
 def assemble_tau(
     e_KH: torch.Tensor,
     prims: torch.Tensor,
@@ -371,17 +385,33 @@ def assemble_tau(
         tau[..., nu, 0] = tau[..., 0, nu]
     tau[..., 0, 0] = vx * tau[..., 0, 1] + vy * tau[..., 0, 2]
 
+    if coeffs.energy == "trace":
+        # beta fixes the shape, e the half-trace: ½ tau^mu_mu = e exactly.
+        tau = tau * trace_scale(coeffs.beta_xx, coeffs.beta_yy, coeffs.beta_xy, vx, vy)[..., None, None]
+
     return tau
 
 
-def subgrid_energy_from_stress(tau_sgs: torch.Tensor) -> torch.Tensor:
-    r"""Extract ``e_KH = 1/2 sum_i tau^{ii}`` from an exact SGS stress tensor.
+def subgrid_energy_from_stress(tau_sgs: torch.Tensor, energy: str = "lab") -> torch.Tensor:
+    r"""Extract ``e_KH`` from an exact SGS stress tensor, in the given definition.
 
     This is the measurement that the DNS seeding mode and the whole a-priori
-    calibration are built on. The sum runs over x and y only, matching the 2D
-    definition used throughout this module.
+    calibration are built on. ``"lab"``: ½(τ^xx + τ^yy); ``"trace"``: ½ τ^μ_μ with
+    g = diag(-1, 1, 1, 1) (see :class:`MInITCoefficients`).
     """
+    if energy == "trace":
+        return 0.5 * (-tau_sgs[..., 0, 0] + tau_sgs[..., 1, 1] + tau_sgs[..., 2, 2] + tau_sgs[..., 3, 3])
     return 0.5 * (tau_sgs[..., 1, 1] + tau_sgs[..., 2, 2])
+
+
+def trace_energy(tau3: torch.Tensor, vx: torch.Tensor, vy: torch.Tensor) -> torch.Tensor:
+    r"""½ τ^μ_μ from the spatial ``[τ^xx, τ^yy, τ^xy]`` a reduction cache stores.
+
+    Exact for a transverse stress with τ^zz = 0: τ^00 = v_i v_j τ^ij (to round-off
+    against the full tensor, checked on dns2k_s1).
+    """
+    txx, tyy, txy = tau3[..., 0], tau3[..., 1], tau3[..., 2]
+    return 0.5 * (txx + tyy - (vx * vx * txx + vy * vy * tyy + 2.0 * vx * vy * txy))
 
 
 # ---------------------------------------------------------------------------

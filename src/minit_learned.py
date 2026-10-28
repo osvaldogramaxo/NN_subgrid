@@ -63,7 +63,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.features import periodic_gradient_2d
-from src.minit import MInITCoefficients, assemble_tau
+from src.minit import MInITCoefficients, assemble_tau, subgrid_energy_from_stress
 
 # Small compared with the median e_KH of ~7.5e-4 on dns_khi at r=16, large
 # enough that log() of an empty cell is finite rather than -inf.
@@ -307,6 +307,7 @@ class LearnedMInITConfig:
     gain: float = 1.0
     log_e_mean: float = 0.0     # target standardisation, applied at predict time
     log_e_std: float = 1.0
+    energy: str = "lab"         # e_KH definition, see MInITCoefficients
     # ``gain`` multiplies e_KH after prediction. It is NOT a calibration: the
     # a-priori optimum is 0.958, i.e. the fitted amplitude is already right.
     # It exists because the *true* stress is not the optimal stress for a
@@ -317,7 +318,7 @@ class LearnedMInITConfig:
 
     def coefficients(self) -> MInITCoefficients:
         return MInITCoefficients(
-            beta_xx=self.beta_xx, beta_yy=self.beta_yy, beta_xy=self.beta_xy
+            beta_xx=self.beta_xx, beta_yy=self.beta_yy, beta_xy=self.beta_xy, energy=self.energy
         )
 
 
@@ -511,12 +512,14 @@ class HybridClosure:
             e_l = self.learned.e_KH
         else:
             tau_e, _ = self.energy(prims)
-            e_l = (0.5 * (tau_e[..., 1, 1] + tau_e[..., 2, 2])).clamp(min=0.0)
+            e_l = subgrid_energy_from_stress(tau_e, self.learned.coeffs.energy).clamp(min=0.0)
             tau_l = assemble_tau(e_l, prims, self.learned.coeffs)
-        e_t = 0.5 * (tau_t[..., 1, 1] + tau_t[..., 2, 2])
+        # Every energy in the energy model's definition (MInITCoefficients.energy).
+        e_t = subgrid_energy_from_stress(tau_t, self.learned.coeffs.energy)
         if getattr(getattr(self.tbnn, "model", None), "shape_only", False):
-            # Shape network (trace 1): e_t is the shape's own lab-frame (tau^xx + tau^yy)/2,
-            # ~0.5-0.68 on exact data, so the rescale is bounded and needs no fallback.
+            # Shape network (trace 1): with energy = "trace", e_t = ½ exactly and this is
+            # tau = 2 e shape. With "lab", e_t is the shape's own ½(tau^xx + tau^yy), ~0.5-0.68
+            # on exact data, so the rescale is bounded and needs no fallback.
             # SHAPE_E_MIN only guards against an unphysical predicted shape.
             ok = e_t > SHAPE_E_MIN
             scale = e_l / e_t.clamp(min=SHAPE_E_MIN)

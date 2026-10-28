@@ -98,6 +98,15 @@ Next steps:
       Before (c): redefine e = 1/2 tr tau (covariant; the hybrid becomes tau = 2 e shape, no
       division) and refit MInIT / MiNNit on it. MInIT is Newtonian; the lab-frame e was our port's
       literal transcription, ~6% above 1/2 tr tau on average.
+      ENERGY SWITCH DONE (28/10): MInITCoefficients.energy / LearnedMInITConfig.energy = "lab"
+      (default, all old fits) or "trace" (e = 1/2 tau^mu_mu; assemble_tau rescales beta e per
+      cell so 1/2 tr = e). minit_calibrate / train_minit_coeff --energy trace.
+      Refits: coeffs_2k_r128_cell_trace.json (C 3.36 -> 3.54, beta ~unchanged, Eq25 1.040 ->
+      1.044), minit_coeff_2k_r128_trace.pt (s1 Eq25 0.772 -> 0.798; seed spread +-0.008).
+      Shape network a priori, s1-s5 (results/dns2k/shape_trace_apriori_s*.log), Eq25 lab -> trace:
+        x exact e 0.228 -> 0.231, hybrid (x MiNNit) 0.482 -> 0.505, x MInIT eq. seed 1.318 -> 1.337.
+      Trace is ~0.02 worse, consistently across s1-s5: the lab-frame inputs (|S|, |dy vx|) predict the
+      lab e slightly better. With trace the hybrid is exactly tau = 2 e shape (0% guarded cells).
    b) Loss (1-2 days, one condor retrain): add a log-energy term
       (log tr tau_pred - log tr tau_exact)^2 to the TBNN loss (src/losses.py). Accept only
       if rollouts improve: refit, gain and the Eq.25 loss all helped a priori and hurt

@@ -238,11 +238,10 @@ def run_short_horizon(
         if coeff_sets:
             fine0 = [torch.tensor(snap0[k], dtype=dtype) for k in ("rho", "vx", "vy", "p")]
             _, tau0 = compute_sgs_stress(*fine0, r=r, project_to_fluid_frame=True)
-            e_seed = subgrid_energy_from_stress(tau0).to(device)
         for variant, (coeffs, mode) in coeff_sets.items():
             s = _fresh()
             closure = MInITClosure(dx=dx, dy=dy, delta_f=dx, coeffs=coeffs, mode=mode)
-            closure.initialize(s.prims, e_KH=e_seed)
+            closure.initialize(s.prims, e_KH=subgrid_energy_from_stress(tau0, coeffs.energy).to(device))
             s.evolve(t1, sgs_closure=closure, **quiet)
             errors[f"minit_{variant}"].append(_score(s))
 

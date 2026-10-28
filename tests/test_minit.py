@@ -670,3 +670,20 @@ class TestRowAveragedMInIT:
         a.initialize(p, e_KH=e0.clone()); b.initialize(p, e_KH=e0.clone())
         a.advance(p, 1e-3); b.advance(p, 1e-3)
         assert torch.equal(a.e_KH, b.e_KH)
+
+
+def test_trace_energy_definition_is_consistent():
+    """energy = "trace": assemble_tau has ½ tau^mu_mu = e, and both trace extractors agree."""
+    import torch
+    from src.minit import MInITCoefficients, assemble_tau, subgrid_energy_from_stress, trace_energy
+    torch.manual_seed(0)
+    e = torch.rand(8, 8, dtype=torch.float64)
+    prims = torch.stack([torch.ones(8, 8), 0.4 * torch.rand(8, 8) - 0.2, 0.4 * torch.rand(8, 8) - 0.2,
+                         torch.ones(8, 8)], -1).double()
+    c = MInITCoefficients(beta_xx=1.7, beta_yy=0.3, beta_xy=0.03, energy="trace")
+    tau = assemble_tau(e, prims, c)
+    assert torch.allclose(subgrid_energy_from_stress(tau, "trace"), e)
+    tau3 = torch.stack([tau[..., 1, 1], tau[..., 2, 2], tau[..., 1, 2]], -1)
+    assert torch.allclose(trace_energy(tau3, prims[..., 1], prims[..., 2]), e)
+    lab = assemble_tau(e, prims, MInITCoefficients(beta_xx=1.7, beta_yy=0.3, beta_xy=0.03))
+    assert torch.allclose(subgrid_energy_from_stress(lab), e)                 # "lab" unchanged

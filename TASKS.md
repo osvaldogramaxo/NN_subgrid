@@ -88,6 +88,16 @@ Next steps:
       DECIDED 28/10: skip the scaled TBNN. It would land near the MiNNit hybrid (0.525),
       while TBNN shape x MInIT energy (0.415) is within ~1 SE of the TBNN shape x exact e
       ceiling (0.397). Rollouts 1371455/6 cancelled. Next: solver in the loop (c).
+      SHAPE NETWORK (28/10, condor 1371460, checkpoints_2k_r128_shape, --shape-only): predicts
+      tau / tr(tau) (trace 1 via E0 = h), trained on shape x exact trace; no accel/theta/Mach.
+      A priori, mean s1-s5 (results/dns2k/shape_apriori_s*.log), Eq25 vs the current TBNN shape:
+        x exact e 0.246 -> 0.228 (5/5 better), x MiNNit e (hybrid) 0.491 -> 0.482 (5/5),
+        x MInIT e (eq. seed) 1.311 -> 1.318 (+0.007, 5/5 worse, negligible).
+      Guarded cells (rescale denominator < 0.25) 0.0-0.1%, vs 7.6-9% fallback before.
+      As good or slightly better, and no fallback machinery. Use it as the frozen shape for (c).
+      Before (c): redefine e = 1/2 tr tau (covariant; the hybrid becomes tau = 2 e shape, no
+      division) and refit MInIT / MiNNit on it. MInIT is Newtonian; the lab-frame e was our port's
+      literal transcription, ~6% above 1/2 tr tau on average.
    b) Loss (1-2 days, one condor retrain): add a log-energy term
       (log tr tau_pred - log tr tau_exact)^2 to the TBNN loss (src/losses.py). Accept only
       if rollouts improve: refit, gain and the Eq.25 loss all helped a priori and hurt

@@ -85,8 +85,9 @@ Next steps:
         strain out of distribution; the TBNN must learn the scaling and does not extrapolate.
       Next idea: build the same scaling into the TBNN (tau = rho lam^2 |S|^2 x sum g_n E_n,
       with normalised E_n). That is close to the hybrid, which conclusion 1 already favours.
-      Rollouts (condor 1371455/6) are still running; they test whether the new shape keeps
-      the hybrids' scores.
+      DECIDED 28/10: skip the scaled TBNN. It would land near the MiNNit hybrid (0.525),
+      while TBNN shape x MInIT energy (0.415) is within ~1 SE of the TBNN shape x exact e
+      ceiling (0.397). Rollouts 1371455/6 cancelled. Next: solver in the loop (c).
    b) Loss (1-2 days, one condor retrain): add a log-energy term
       (log tr tau_pred - log tr tau_exact)^2 to the TBNN loss (src/losses.py). Accept only
       if rollouts improve: refit, gain and the Eq.25 loss all helped a priori and hurt

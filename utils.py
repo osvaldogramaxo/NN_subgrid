@@ -284,6 +284,12 @@ class CRMHD_TBNN(nn.Module):
         # Separate scalar head for subgrid isotropic pressure / bulk dissipation
         self.p_sgs_head = nn.Linear(hidden_dim, 1)
 
+        # Inputs (indices into the 17 features) and basis tensors (into the 12) the
+        # network may not use: zeroed in forward, so every caller honours them.
+        # Set by train_apriori --drop-inputs / --drop-basis, stored in the checkpoint.
+        self.drop_inputs: tuple[int, ...] = ()
+        self.drop_basis: tuple[int, ...] = ()
+
     @classmethod
     def from_state_dict(
         cls,
@@ -351,6 +357,8 @@ class CRMHD_TBNN(nn.Module):
             state_dict=state_dict,
             num_thermo_inputs=thermo_inputs,
         ).to(dtype=dtype, device=device)
+        model.drop_inputs = tuple(ckpt_dict.get("drop_inputs", ()))
+        model.drop_basis = tuple(ckpt_dict.get("drop_basis", ()))
 
         return model, ckpt_dict
 
@@ -382,9 +390,13 @@ class CRMHD_TBNN(nn.Module):
             Predicted scalar isotropic SGS pressure $P_{\text{SGS}}$ with shape (..., 1).
         """
         features = torch.cat([invariants, thermo_inputs], dim=-1)
+        if self.drop_inputs:
+            features = features.index_fill(-1, torch.tensor(self.drop_inputs, device=features.device), 0.0)
         latent = self.hidden_mlp(features)
 
         coeffs = self.coeff_head(latent)  # Shape: (..., 12)
+        if self.drop_basis:
+            coeffs = coeffs.index_fill(-1, torch.tensor(self.drop_basis, device=coeffs.device), 0.0)
         p_sgs = self.p_sgs_head(latent)   # Shape: (..., 1)
 
         # Multiplicative layer: \Delta T^{\mu\nu} = \sum_{n=0}^{11} G^{(n)} E^{(n)\mu\nu}

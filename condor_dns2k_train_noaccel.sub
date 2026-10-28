@@ -1,0 +1,15 @@
+# As condor_dns2k_train.sub, without the acceleration invariants (Λ11-15), θ and Mach, and
+# without the acceleration basis tensors E9-E11: those inputs collapse on solver states (TASKS 28/10).
+universe       = vanilla
+getenv         = True
+
+executable     = ./run_train.sh
+arguments      = "dns2k_s0 128 1 2500 2 1e-3 cuda 10 200 --time-range 1.0 20.0 --test-time 0 0 --tensor-floor-scope snapshot --drop-inputs 10 11 12 13 14 15 16 --drop-basis 9 10 11"
+environment    = "CHECKPOINT_DIR=checkpoints_2k_r128_noaccel"
+output         = ./condor_logs/train2k_noaccel_$(Cluster).out
+error          = ./condor_logs/train2k_noaccel_$(Cluster).err
+log            = ./condor_logs/train2k_noaccel_$(Cluster).log
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+queue 1

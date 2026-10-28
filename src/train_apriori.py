@@ -1284,6 +1284,8 @@ def train(
     tensor_floor_scope: str = "snapshot",
     tensor_floor_floor_frac: float = 0.05,
     spectral_highk_tilt: float = 0.0,
+    drop_inputs: tuple[int, ...] = (),
+    drop_basis: tuple[int, ...] = (),
     calibrate_output: bool = True,
     gamma_eos: float | None = None,
     seed: int = 0,
@@ -1504,6 +1506,9 @@ def train(
         num_hidden_layers=num_hidden_layers,
         hidden_dim=hidden_dim,
     ).to(dtype=dtype, device=device)
+    model.drop_inputs, model.drop_basis = tuple(drop_inputs), tuple(drop_basis)
+    if drop_inputs or drop_basis:
+        print(f"  Dropped inputs {list(drop_inputs)}, basis tensors {list(drop_basis)}")
 
     # Calibrate the output magnitude before the first step.
     #
@@ -1983,6 +1988,8 @@ def train(
             "num_invariants": 15,
             "num_thermo_inputs": 2,
             "num_basis_tensors": 12,
+            "drop_inputs": list(drop_inputs),
+            "drop_basis": list(drop_basis),
             "history": history,
         }
 
@@ -2087,6 +2094,8 @@ def train(
         "num_invariants": 15,
         "num_thermo_inputs": 2,
         "num_basis_tensors": 12,
+        "drop_inputs": list(drop_inputs),
+        "drop_basis": list(drop_basis),
         "history": history,
     }, os.path.join(checkpoint_dir, "final_model.pt"))
 
@@ -2280,6 +2289,11 @@ if __name__ == "__main__":
                              "where a fraction of the mean is not. Lower values hand more of the "
                              "gradient to quasi-laminar cells: at 0.05*mean the weakest decile "
                              "carries 43%% of the loss, at the median 20%%.")
+    parser.add_argument("--drop-inputs", type=int, nargs="*", default=[],
+                        help="Input indices the network may not use (0-14 = Λ1-15, 15 = θ, 16 = Mach). "
+                             "TASKS 28/10: 10 11 12 13 14 15 16 drops acceleration, θ and Mach.")
+    parser.add_argument("--drop-basis", type=int, nargs="*", default=[],
+                        help="Basis tensors the network may not use (9-11 contain the acceleration).")
     parser.add_argument("--no-calibrate-output", action="store_true",
                         help="Skip rescaling coeff_head at init to match the target tau scale. "
                              "Without calibration the first epochs only shrink the output: "
@@ -2400,6 +2414,8 @@ if __name__ == "__main__":
         tensor_floor_scope=args.tensor_floor_scope,
         tensor_floor_floor_frac=args.tensor_floor_floor_frac,
         spectral_highk_tilt=args.spectral_highk_tilt,
+        drop_inputs=tuple(args.drop_inputs),
+        drop_basis=tuple(args.drop_basis),
         calibrate_output=not args.no_calibrate_output,
         gamma_eos=None,   # resolved from dataset metadata by configure()
         seed=args.seed,

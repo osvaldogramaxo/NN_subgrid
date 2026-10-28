@@ -73,7 +73,7 @@ from tqdm import tqdm
 # Project imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.config import add_config_arguments, apply_config_defaults, configure  # noqa: E402
-from utils import CRMHD_TBNN
+from utils import CRMHD_TBNN, minkowski_trace
 from src.dataset import SGSDataset, create_dataloaders
 from src.features import extract_tbnn_features
 from src.losses import RMHDSGSLoss
@@ -651,6 +651,8 @@ def _forward_group(
     inv_norm = (group["invariants"] - inv_mean) / inv_std
     thermo_norm = (group["thermo"] - thermo_mean) / thermo_std
     delta_T, _coeffs, _p_sgs = model(inv_norm, thermo_norm, group["basis"])
+    if getattr(model, "shape_only", False):   # predicted shape x exact trace: every loss term sees a stress
+        delta_T = minkowski_trace(group["tau_sgs"])[..., None, None] * delta_T
     return delta_T
 
 
@@ -1185,6 +1187,8 @@ def plot_pred_vs_truth(
     tau_target = group["tau_sgs"]
 
     delta_T, _, _ = model(inv_norm, thermo_norm, basis)
+    if getattr(model, "shape_only", False):
+        delta_T = minkowski_trace(tau_target)[..., None, None] * delta_T
 
     tau_pred_2d = delta_T.reshape(Ny, Nx, 4, 4).cpu().numpy()
     tau_true_2d = tau_target.reshape(Ny, Nx, 4, 4).cpu().numpy()
@@ -1287,6 +1291,7 @@ def train(
     spectral_highk_tilt: float = 0.0,
     drop_inputs: tuple[int, ...] = (),
     drop_basis: tuple[int, ...] = (),
+    shape_only: bool = False,
     calibrate_output: bool = True,
     gamma_eos: float | None = None,
     seed: int = 0,
@@ -1508,6 +1513,10 @@ def train(
         hidden_dim=hidden_dim,
     ).to(dtype=dtype, device=device)
     model.drop_inputs, model.drop_basis = tuple(drop_inputs), tuple(drop_basis)
+    model.shape_only = shape_only
+    if shape_only:
+        print("  Shape-only: predicting tau / tr(tau); the loss sees shape x exact trace")
+        calibrate_output = False    # the trace is fixed, and the exact trace sets the scale
     if drop_inputs or drop_basis:
         print(f"  Dropped inputs {list(drop_inputs)}, basis tensors {list(drop_basis)}")
 
@@ -1991,6 +2000,7 @@ def train(
             "num_basis_tensors": 12,
             "drop_inputs": list(drop_inputs),
             "drop_basis": list(drop_basis),
+            "shape_only": shape_only,
             "history": history,
         }
 
@@ -2097,6 +2107,7 @@ def train(
         "num_basis_tensors": 12,
         "drop_inputs": list(drop_inputs),
         "drop_basis": list(drop_basis),
+        "shape_only": shape_only,
         "history": history,
     }, os.path.join(checkpoint_dir, "final_model.pt"))
 
@@ -2295,6 +2306,8 @@ if __name__ == "__main__":
                              "TASKS 28/10: 10 11 12 13 14 15 16 drops acceleration, θ and Mach.")
     parser.add_argument("--drop-basis", type=int, nargs="*", default=[],
                         help="Basis tensors the network may not use (9-11 contain the acceleration).")
+    parser.add_argument("--shape-only", action="store_true",
+                        help="Train the stress shape tau / tr(tau) only (for TBNN shape x separate energy).")
     parser.add_argument("--no-calibrate-output", action="store_true",
                         help="Skip rescaling coeff_head at init to match the target tau scale. "
                              "Without calibration the first epochs only shrink the output: "
@@ -2417,6 +2430,7 @@ if __name__ == "__main__":
         spectral_highk_tilt=args.spectral_highk_tilt,
         drop_inputs=tuple(args.drop_inputs),
         drop_basis=tuple(args.drop_basis),
+        shape_only=args.shape_only,
         calibrate_output=not args.no_calibrate_output,
         gamma_eos=None,   # resolved from dataset metadata by configure()
         seed=args.seed,

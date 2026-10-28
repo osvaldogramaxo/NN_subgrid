@@ -248,6 +248,11 @@ def compute_crmhd_basis_tensors(
     return torch.stack([e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11], dim=-3)
 
 
+def minkowski_trace(T: torch.Tensor) -> torch.Tensor:
+    r"""$T^\mu{}_\mu = g_{\mu\nu} T^{\mu\nu}$ with $g = \mathrm{diag}(-1, 1, 1, 1)$, for (..., 4, 4) contravariant T."""
+    return -T[..., 0, 0] + T[..., 1, 1] + T[..., 2, 2] + T[..., 3, 3]
+
+
 class CRMHD_TBNN(nn.Module):
     r"""Tensor Basis Neural Network for Compressible Relativistic MHD SGS Closures[cite: 1].
 
@@ -289,6 +294,11 @@ class CRMHD_TBNN(nn.Module):
         # Set by train_apriori --drop-inputs / --drop-basis, stored in the checkpoint.
         self.drop_inputs: tuple[int, ...] = ()
         self.drop_basis: tuple[int, ...] = ()
+        # Shape-only mode (TASKS 28/10): output the stress *shape* tau / tr(tau), trace 1 by
+        # construction, for use with a separate energy model. The trace is set through
+        # E0 = h (trace 3) rather than by dropping g0, since sigma (E1) is not exactly
+        # trace-free in our kinematics.
+        self.shape_only: bool = False
 
     @classmethod
     def from_state_dict(
@@ -359,6 +369,7 @@ class CRMHD_TBNN(nn.Module):
         ).to(dtype=dtype, device=device)
         model.drop_inputs = tuple(ckpt_dict.get("drop_inputs", ()))
         model.drop_basis = tuple(ckpt_dict.get("drop_basis", ()))
+        model.shape_only = bool(ckpt_dict.get("shape_only", False))
 
         return model, ckpt_dict
 
@@ -401,6 +412,9 @@ class CRMHD_TBNN(nn.Module):
 
         # Multiplicative layer: \Delta T^{\mu\nu} = \sum_{n=0}^{11} G^{(n)} E^{(n)\mu\nu}
         delta_T_sgs = torch.einsum("...n,...nij->...ij", coeffs, basis_tensors)
+        if self.shape_only:
+            delta_T_sgs = delta_T_sgs + ((1.0 - minkowski_trace(delta_T_sgs)) / 3.0)[..., None, None] \
+                * basis_tensors[..., 0, :, :]
 
         return delta_T_sgs, coeffs, p_sgs
 

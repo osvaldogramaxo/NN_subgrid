@@ -446,6 +446,9 @@ class LearnedMInITClosure:
         return tau, alpha
 
 
+SHAPE_E_MIN = 0.25    # half the smallest (tau^xx + tau^yy) / (2 tr tau) seen in the exact stress
+
+
 class HybridClosure:
     r"""TBNN tensor *shape* x MiNNit *amplitude* (FEASIBILITY §5, §13).
 
@@ -511,10 +514,18 @@ class HybridClosure:
             e_l = (0.5 * (tau_e[..., 1, 1] + tau_e[..., 2, 2])).clamp(min=0.0)
             tau_l = assemble_tau(e_l, prims, self.learned.coeffs)
         e_t = 0.5 * (tau_t[..., 1, 1] + tau_t[..., 2, 2])
-        ok = e_t > self.floor * e_l.mean()
-        scale = torch.where(ok, e_l / e_t.clamp(min=1e-300), torch.zeros_like(e_t))
-        tau = torch.where(ok[..., None, None], tau_t * scale[..., None, None], tau_l)
-        self.fallback_fraction = float((~ok).double().mean())
+        if getattr(getattr(self.tbnn, "model", None), "shape_only", False):
+            # Shape network (trace 1): e_t is the shape's own lab-frame (tau^xx + tau^yy)/2,
+            # ~0.5-0.68 on exact data, so the rescale is bounded and needs no fallback.
+            # SHAPE_E_MIN only guards against an unphysical predicted shape.
+            ok = e_t > SHAPE_E_MIN
+            scale = e_l / e_t.clamp(min=SHAPE_E_MIN)
+            tau = tau_t * scale[..., None, None]
+        else:
+            ok = e_t > self.floor * e_l.mean()
+            scale = torch.where(ok, e_l / e_t.clamp(min=1e-300), torch.zeros_like(e_t))
+            tau = torch.where(ok[..., None, None], tau_t * scale[..., None, None], tau_l)
+        self.fallback_fraction = float((~ok).double().mean())   # shape network: guarded cells
         self.max_scale = float(scale.max())
         if self.clip_mode is not None:
             from src.solver import clip_sgs_tensor

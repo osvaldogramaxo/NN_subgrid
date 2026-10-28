@@ -40,6 +40,9 @@ snaps = [s for s in (read_snapshot(f) for f in files[::int(stride)])
 GAINS = {"TBNN": (1.6, 2.5), "hybrid": (1.3, 1.6)}   # condor_ensemble_2k_gain.sub
 taus = {"TBNN": [], "MiNNit": [], "hybrid": [], "TBNN shape x exact e": [], "exact shape x MiNNit e": []}
 taus.update({f"{m} x{g}": [] for m, gs in GAINS.items() for g in gs})
+if model.shape_only:    # a shape network has no stress of its own; only its hybrids are scored
+    for k in ["TBNN", *(f"TBNN x{g}" for g in GAINS["TBNN"])]:
+        del taus[k]
 e_minit = {}
 if len(sys.argv) > 6:
     from src.minit import LAMBDA_OVER_DELTA, MInITCoefficients, saturation_energy  # noqa: E402
@@ -72,12 +75,13 @@ for snap in snaps:
     abl_s = HybridClosure(exact_c, le)                       # exact shape, MiNNit energy
     pick = lambda t: torch.stack([t[..., 1, 1], t[..., 2, 2], t[..., 1, 2]], -1)
     with torch.no_grad():
-        taus["TBNN"].append(pick(tb(prims)[0]))
+        if not model.shape_only:
+            taus["TBNN"].append(pick(tb(prims)[0]))
         taus["MiNNit"].append(pick(le(prims)[0]))
         taus["hybrid"].append(pick(hy(prims)[0]))
         taus["TBNN shape x exact e"].append(pick(abl_e(prims)[0]))
         taus["exact shape x MiNNit e"].append(pick(abl_s(prims)[0]))
-        for g in GAINS["TBNN"]:
+        for g in GAINS["TBNN"] if not model.shape_only else ():
             tb_g = TBNNSGSClosure(model, ck["inv_mean"], ck["inv_std"], ck["thermo_mean"],
                                   ck["thermo_std"], dx, dy, gain=g)
             taus[f"TBNN x{g}"].append(pick(tb_g(prims)[0]))

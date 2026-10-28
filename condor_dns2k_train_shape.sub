@@ -1,0 +1,16 @@
+# Shape-only TBNN (TASKS 28/10): predicts tau / tr(tau) (trace 1 by construction) for use with a
+# separate energy model; trained on shape x exact trace. Inputs and basis as in the
+# no-acceleration retrain, since the acceleration added nothing to the shape (hybrid Eq.25 0.492).
+universe       = vanilla
+getenv         = True
+
+executable     = ./run_train.sh
+arguments      = "dns2k_s0 128 1 2500 2 1e-3 cuda 10 200 --time-range 1.0 20.0 --test-time 0 0 --tensor-floor-scope snapshot --drop-inputs 10 11 12 13 14 15 16 --drop-basis 9 10 11 --shape-only"
+environment    = "CHECKPOINT_DIR=checkpoints_2k_r128_shape"
+output         = ./condor_logs/train2k_shape_$(Cluster).out
+error          = ./condor_logs/train2k_shape_$(Cluster).err
+log            = ./condor_logs/train2k_shape_$(Cluster).log
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+queue 1

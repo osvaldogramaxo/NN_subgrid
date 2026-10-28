@@ -715,10 +715,12 @@ class TBNNSGSClosure:
         delta_T, _, _ = self.model_f32(inv_norm, thermo_norm, basis)
         tau_perp = self.gain * delta_T.to(prims.dtype).reshape(Ny, Nx, 4, 4)
 
-        # Realizability clipping
-        tau_perp = clip_sgs_tensor(
-            tau_perp, prims, mode=self.clip_mode, kappa=self.clip_kappa,
-        )
+        # Realizability clipping. A shape-only model outputs the dimensionless tau / tr(tau);
+        # the clip belongs to the stress it becomes (HybridClosure clips that).
+        if not getattr(self.model, "shape_only", False):
+            tau_perp = clip_sgs_tensor(
+                tau_perp, prims, mode=self.clip_mode, kappa=self.clip_kappa,
+            )
 
         if self.tau_smooth_passes:
             tau_perp = smooth_sgs_tensor(tau_perp, self.tau_smooth_passes)

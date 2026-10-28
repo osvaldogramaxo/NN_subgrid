@@ -62,3 +62,4 @@ scratch/*
 !scratch/minit_fair_compare.py
 !scratch/minit_rollout_merge.py
 !scratch/tbnn_energy_diagnosis.py
+!scratch/after_noaccel_train.sh

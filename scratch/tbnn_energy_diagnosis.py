@@ -13,9 +13,12 @@ TBNN x MInIT-ODE hybrid -- and compare with the exact filtered-DNS energy at the
 Then: the TBNN's 17 standardised inputs on DNS vs simulation states, and a counterfactual
 that sets some inputs on DNS states to their simulation value.
 
-Run from the repo root (~5 min; the energies are cached in results/tbnn_energy_diag/):
-    OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES="" PYTHONPATH=. ./.venv/bin/python -u scratch/tbnn_energy_diagnosis.py
+Run from the repo root (~5 min; the energies are cached in the output dir):
+    OMP_NUM_THREADS=8 CUDA_VISIBLE_DEVICES="" PYTHONPATH=. ./.venv/bin/python -u scratch/tbnn_energy_diagnosis.py \
+        [tbnn_checkpoint (checkpoints_2k_r128/best_model.pt)] [out_dir (results/tbnn_energy_diag)]
+The states always come from the saved rollouts above, whichever TBNN is scored.
 """
+import sys
 from pathlib import Path
 
 import torch
@@ -29,7 +32,8 @@ from src.solver import clip_sgs_tensor
 from utils import CRMHD_TBNN
 
 DT = torch.float64
-OUT = Path("results/tbnn_energy_diag")
+CKPT = sys.argv[1] if len(sys.argv) > 1 else "checkpoints_2k_r128/best_model.pt"
+OUT = Path(sys.argv[2] if len(sys.argv) > 2 else "results/tbnn_energy_diag")
 RUNS = [f"dns2k_s{s}_s{m}" for s in range(1, 6) for m in (0, 1)]
 FAMILIES = ["dns", "exact", "unclosed", "tbnn", "minnit", "hybrid", "hybrid-minitE"]
 WINDOWS = [(1.5, 4.0), (4.0, 7.0), (7.0, 10.0)]
@@ -37,7 +41,7 @@ WINDOWS = [(1.5, 4.0), (4.0, 7.0), (7.0, 10.0)]
 COUNTERFACTUALS = {"accel (Λ11-13)": [10, 11, 12], "θ": [15], "Mach": [16],
                    "accel + θ": [10, 11, 12, 15], "accel + θ + Mach": [10, 11, 12, 15, 16]}
 
-model, ck = CRMHD_TBNN.from_checkpoint("checkpoints_2k_r128/best_model.pt", device="cpu", dtype=DT)
+model, ck = CRMHD_TBNN.from_checkpoint(CKPT, device="cpu", dtype=DT)
 model.eval()
 mc = MInITCoefficients.load("results/minit_fair/coeffs_2k_r128_cell.json")
 A_, C_ = (torch.tensor([v], dtype=DT) for v in (mc.A_gamma, mc.C))

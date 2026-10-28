@@ -25,7 +25,10 @@ ROOTS = {"abl": "results/ensemble_2k_r128_abl", "cell": "results/ensemble_2k_r12
          "hm": "results/ensemble_2k_r128_hybrid_minit",
          "g1": "results/ensemble_2k_r128_gain/tg1.6_hg1.3", "g2": "results/ensemble_2k_r128_gain/tg2.5_hg1.6",
          "clip, adv": "results/ensemble_2k_r128_minit_advect",          # §29 advection
-         "clip, adv, refit": "results/ensemble_2k_r128_minit_advect_refit"}
+         "clip, adv, refit": "results/ensemble_2k_r128_minit_advect_refit",
+         "na": "results/ensemble_2k_r128_noaccel",                     # TASKS 28/10: TBNN without
+         "na hm": "results/ensemble_2k_r128_noaccel_hybrid_minit"}     # acceleration, theta, Mach
+NEW_SHAPE, SHAPED = {"na", "na hm"}, ("TBNN", "hybrid", "TBNN shape x MInIT energy")
 GAIN = {"g1": {"TBNN": 1.6, "hybrid": 1.3}, "g2": {"TBNN": 2.5, "hybrid": 1.6}}
 RENAME = {"learned-2k_r128": "MiNNit", "hybrid-minitE": "TBNN shape x MInIT energy",
           "ablation-exactE": "TBNN shape x exact energy", "ablation-exactS": "exact shape x MiNNit energy"}
@@ -76,6 +79,8 @@ for m in members:
                 name = f"MInIT ({name}) [{tag}]"
             if name in GAIN.get(tag, {}):
                 name = f"{name} x{GAIN[tag][name]}"
+            if tag in NEW_SHAPE and name in SHAPED:
+                name = f"{name} (no accel)"
             sc = score(run, d["dns"], t)
             if sc is None:
                 continue
@@ -122,7 +127,8 @@ PAIRS = [("exact", "hybrid x1.6"), ("hybrid x1.6", "TBNN shape x MInIT energy"),
          ("TBNN x2.5", "TBNN"),
          ("MInIT (fitted) [clip, adv]", "MInIT (fitted) [cell, eq-seed, clip]"),
          ("MInIT (fitted) [clip, adv, refit]", "MInIT (fitted) [cell, eq-seed, clip]"),
-         ("MInIT (fitted) [clip, adv, refit]", "MiNNit")]
+         ("MInIT (fitted) [clip, adv, refit]", "MiNNit"),
+         *((f"{k} (no accel)", k) for k in SHAPED), ("TBNN (no accel)", "MiNNit")]
 print("\npaired, A - B (prof err / pdf W1 / |dtheta| / corr t<=10; negative = A closer, except corr):")
 for a, b in PAIRS:
     if a not in rows or b not in rows:

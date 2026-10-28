@@ -17,7 +17,10 @@ ROOTS = {"abl": "results/ensemble_2k_r128_abl", "cell": "results/ensemble_2k_r12
          "hm": "results/ensemble_2k_r128_hybrid_minit",
          "g1": "results/ensemble_2k_r128_gain/tg1.6_hg1.3", "g2": "results/ensemble_2k_r128_gain/tg2.5_hg1.6",
          "clip, adv": "results/ensemble_2k_r128_minit_advect",          # §29 advection
-         "clip, adv, refit": "results/ensemble_2k_r128_minit_advect_refit"}
+         "clip, adv, refit": "results/ensemble_2k_r128_minit_advect_refit",
+         "na": "results/ensemble_2k_r128_noaccel",                     # TASKS 28/10: TBNN without
+         "na hm": "results/ensemble_2k_r128_noaccel_hybrid_minit"}     # acceleration, theta, Mach
+NEW_SHAPE, SHAPED = {"na", "na hm"}, ("TBNN", "hybrid", "TBNN shape x MInIT energy")
 GAIN = {"g1": {"TBNN": 1.6, "hybrid": 1.3}, "g2": {"TBNN": 2.5, "hybrid": 1.6}}   # §27 amplitude test
 ROOTS = {k: v for k, v in ROOTS.items() if glob.glob(v + "/*/metrics.json")}
 members = sorted(os.path.basename(p) for p in glob.glob(ROOTS["abl"] + "/*"))
@@ -38,7 +41,9 @@ for m in members:
                     "hybrid" if name.startswith("hybrid") else name)
             if name in GAIN.get(tag, {}):
                 name = f"{name} x{GAIN[tag][name]}"
-            if name in ("none", "TBNN", "hybrid") and tag != "abl":
+            if tag in NEW_SHAPE and name in SHAPED:
+                name = f"{name} (no accel)"
+            if name in ("none", "TBNN", "hybrid", "MiNNit") and tag != "abl":
                 # rows rerun by a later job must reproduce the ablation job's
                 if name in got:
                     check.append(abs(r["log_spectral_distance"] - got[name][0]))
@@ -96,3 +101,15 @@ if adv:
         d = np.array([rows[k][m][0] - rows[base][m][0] for m in common])
         print(f"  {k:<40} {d.mean():+.3f} ± {d.std(ddof=1) / np.sqrt(len(d)):.3f}  "
               f"(advection better in {int((d < 0).sum())}/{len(d)})")
+
+new = [k for k in order if k.endswith(" (no accel)")]
+if new:
+    print("\npaired, TBNN without acceleration/theta/Mach - with (negative = new closer to DNS):")
+    for k in new:
+        for ref in (k[:-len(" (no accel)")], "exact", "MiNNit"):
+            common = sorted(set(rows[k]) & set(rows.get(ref, {})))
+            if len(common) < 2:
+                continue
+            d = np.array([rows[k][m][0] - rows[ref][m][0] for m in common])
+            print(f"  {k:<40} vs {ref:<28} {d.mean():+.3f} ± {d.std(ddof=1) / np.sqrt(len(d)):.3f}  "
+                  f"(new better in {int((d < 0).sum())}/{len(d)})")

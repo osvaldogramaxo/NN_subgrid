@@ -62,6 +62,13 @@ Next steps:
       invariants, theta and Mach (sigma/omega invariants only, like MiNNit); score a priori,
       rerun this diagnostic, then rollouts. c) is now better motivated: it trains on the
       solver's own states.
+      SUBMITTED 28/10: condor 1371450, --drop-inputs 10-16 --drop-basis 9 10 11 ->
+      checkpoints_2k_r128_noaccel. Dropping E9-E11 is safe here: in 2D the fluid-frame
+      stress has 4 components (xx, yy, xy, zz), and the best per-cell fit of the exact tau
+      (s1, t = 2..20) captures 100.000% with all 12 tensors, with E0-E8, and even with E0-E3
+      (85% with E0-E2). The 12 tensors span only rank 4. NOT true in 3D or with B: there
+      the a-free set is not complete (Pope needs 10 tensors for sigma, omega alone), so
+      revisit before the MHD step.
    b) Loss (1-2 days, one condor retrain): add a log-energy term
       (log tr tau_pred - log tr tau_exact)^2 to the TBNN loss (src/losses.py). Accept only
       if rollouts improve: refit, gain and the Eq.25 loss all helped a priori and hurt
